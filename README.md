@@ -58,8 +58,8 @@ vault_dir = "/home/anton/Obsidian"
 api_key_file = "/run/secrets/gemini-api-key"
 model = "gemini-2.5-flash"
 timeout = "60s"
-ocr_prompt = "Transcribe the page faithfully. Preserve line breaks when useful. Keep the source language. Do not translate or summarize."
-summary_prompt = "Summarize as 3-5 short bullets covering action items, decisions, deadlines, people. Use the same language as the source."
+ocr_prompt = "Transcribe the page faithfully. Preserve line breaks when useful. Keep the source language. Do not translate or summarize. Preserve visual markup: wrap text highlighted with a marker pen in ==text==; wrap text enclosed in a hand-drawn frame or box in **text**; render hand-drawn checkboxes as `- [ ]` (empty) or `- [x]` (ticked)."
+summary_prompt = "Summarize as 3-5 short bullets covering action items, decisions, deadlines, people. Use the same language as the source. For each bullet that describes a task someone needs to do, prefix it with `[ ] ` so it renders as an Obsidian checkbox. Informational bullets have no prefix."
 
 [[route]]
 from = "Syncs/"
