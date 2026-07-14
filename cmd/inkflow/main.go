@@ -20,6 +20,12 @@ import (
 	"inkflow/internal/webdavserver"
 )
 
+// version and commit are injected at build time via -ldflags.
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
 type runtime struct {
 	logger *slog.Logger
 	cfg    *config.Config
@@ -60,6 +66,7 @@ func newRootCmd(logger *slog.Logger) *cobra.Command {
 		},
 	}
 	cmd.PersistentFlags().StringVarP(&configPath, "config", "c", "inkflow.toml", "config file")
+	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newServeCmd())
 	return cmd
 }
@@ -148,6 +155,19 @@ func newServeCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return webdavserver.Serve(cmd.Context(), rt.cfg, rt.imp, rt.logger)
+		},
+	}
+}
+
+func newVersionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Show build version",
+		Args:  cobra.NoArgs,
+		// Override PersistentPreRunE so config is not loaded for this command.
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return nil },
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("inkflow %s (%s)\n", version, commit)
 		},
 	}
 }
