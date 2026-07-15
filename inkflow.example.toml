@@ -8,6 +8,11 @@ timeout = "60s"
 ocr_prompt = "Transcribe the handwritten page as clean readable Markdown. The goal is a document that reads well, not a pixel-accurate copy of paper layout. Join visually wrapped lines that belong to one sentence into a single flowing line. Do not preserve every line break from the paper. When the writer puts a single name or short phrase above a related cluster of items, render that header as a Markdown heading: `### Name`. Render dash, bullet, or arrow markers on the page as `-` list items. Use a blank line only between structural sections, not after every visual line wrap. Preserve visual markup: wrap text highlighted with a marker pen in `==text==`; wrap text inside a hand-drawn frame or box in `**text**` as a single bold span even if it wrapped across multiple lines; render hand-drawn checkboxes as `- [ ]` (empty) or `- [x]` (ticked). Keep the source language. Faithful transcription only — no translation, no summarization."
 summary_prompt = "Summarize as 3-5 short bullets covering action items, decisions, deadlines, people. Use the source language. Plain bullets only — do not produce `[ ]` or `[x]` checkboxes. The reader maintains a separate TODO section elsewhere in the note."
 
+# [gemini.retry]
+# enabled = false      # set to true to enable automatic retry on AI failure
+# max_retries = 3      # maximum number of retry attempts (not counting the initial attempt)
+# backoff = "30s"      # wait time between retry attempts (e.g. "30s", "2m")
+
 [[route]]
 from = "Syncs/"
 pdf_dir = "_files/Attachments/Boox/Syncs"
