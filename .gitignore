@@ -3,3 +3,4 @@ inkflow.local.toml
 *.db
 .env
 docs/superpowers/
+inkflow
