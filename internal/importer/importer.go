@@ -125,6 +125,10 @@ func (i *Importer) persist(ctx context.Context, existing *state.Record, sourcePa
 		if err != nil {
 			msg := fmt.Sprintf("_AI failed: %s_", err.Error())
 			summaryBody, ocrBody = msg, msg
+			rec.AIStatus = state.AIStatusFailed
+			rec.AIRetryCount++
+			rec.AILastError = err.Error()
+			rec.AILastRetryAt = time.Now().UTC()
 		} else {
 			if res.OCR != "" {
 				ocrBody = res.OCR
@@ -136,6 +140,10 @@ func (i *Importer) persist(ctx context.Context, existing *state.Record, sourcePa
 			} else {
 				summaryBody = "_AI returned no summary._"
 			}
+			rec.AIStatus = state.AIStatusSuccess
+			rec.AIRetryCount++
+			rec.AILastError = ""
+			rec.AILastRetryAt = time.Now().UTC()
 		}
 	}
 
