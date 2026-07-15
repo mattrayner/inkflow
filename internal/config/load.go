@@ -39,7 +39,7 @@ func applyDefaults(cfg *Config) {
 		cfg.DefaultNoteDir = "00 Inbox"
 	}
 	if cfg.Gemini.Model == "" {
-		cfg.Gemini.Model = "gemini-2.5-flash"
+		cfg.Gemini.Model = "gemini-3.5-flash"
 	}
 	if cfg.Gemini.Timeout == "" {
 		cfg.Gemini.Timeout = "60s"
