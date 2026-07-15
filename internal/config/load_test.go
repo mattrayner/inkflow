@@ -13,7 +13,7 @@ vault_dir = "/tmp/vault"
 
 [gemini]
 api_key_file = "/run/secrets/g"
-model = "gemini-2.5-flash"
+model = "gemini-3.5-flash"
 timeout = "30s"
 ocr_prompt = "ocr please"
 summary_prompt = "summary please"
@@ -33,7 +33,7 @@ ai = true
 	if cfg.Gemini.APIKeyFile != "/run/secrets/g" {
 		t.Errorf("APIKeyFile = %q", cfg.Gemini.APIKeyFile)
 	}
-	if cfg.Gemini.Model != "gemini-2.5-flash" {
+	if cfg.Gemini.Model != "gemini-3.5-flash" {
 		t.Errorf("Model = %q", cfg.Gemini.Model)
 	}
 	if cfg.Gemini.Timeout != "30s" {
@@ -65,7 +65,7 @@ from = "Syncs/"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Gemini.Model != "gemini-2.5-flash" {
+	if cfg.Gemini.Model != "gemini-3.5-flash" {
 		t.Errorf("default model = %q", cfg.Gemini.Model)
 	}
 	if cfg.Gemini.Timeout != "60s" {
