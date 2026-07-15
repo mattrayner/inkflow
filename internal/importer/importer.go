@@ -213,3 +213,75 @@ func logImported(sourcePath, notePath, pdfPath string) {
 		logger.Info("imported", "source", sourcePath, "note", notePath, "pdf", pdfPath)
 	}
 }
+
+// RetryAI re-runs the AI processing step for an already-imported record.
+// It reads the PDF from record.VaultPDFPath, calls the AI provider, and on
+// success rewrites the note marker blocks and saves the updated record.
+// On any failure it returns an error without modifying the note or the store —
+// the caller is responsible for updating the record state.
+func (i *Importer) RetryAI(ctx context.Context, rec state.Record) error {
+	if i.ai == nil {
+		return fmt.Errorf("retry AI: no AI provider configured")
+	}
+
+	pdfAbs := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(rec.VaultPDFPath))
+	pdfData, err := os.ReadFile(pdfAbs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("retry AI: vault PDF not found: %s", pdfAbs)
+		}
+		return fmt.Errorf("retry AI: read vault PDF: %w", err)
+	}
+
+	res, err := i.ai.Process(ctx, bytes.NewReader(pdfData))
+	if err != nil {
+		return err
+	}
+
+	var summaryBody, ocrBody string
+	if res.OCR != "" {
+		ocrBody = res.OCR
+	} else {
+		ocrBody = "_AI returned no transcription._"
+	}
+	if len(res.Summary) > 0 {
+		summaryBody = "- " + strings.Join(res.Summary, "\n- ")
+	} else {
+		summaryBody = "_AI returned no summary._"
+	}
+
+	noteAbs := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(rec.VaultNotePath))
+	existing, err := os.ReadFile(noteAbs)
+	if err != nil {
+		return fmt.Errorf("retry AI: read vault note: %w", err)
+	}
+	content := note.UpsertMarkerBlock(string(existing), "Summary", "summary", summaryBody)
+	content = note.UpsertMarkerBlock(content, "OCR", "ocr", ocrBody)
+	if err := os.WriteFile(noteAbs, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("retry AI: write vault note: %w", err)
+	}
+
+	rec.AIStatus = state.AIStatusSuccess
+	rec.AIRetryCount++
+	rec.AILastError = ""
+	rec.AILastRetryAt = time.Now().UTC()
+	if err := i.store.Put(&rec); err != nil {
+		return fmt.Errorf("retry AI: save record: %w", err)
+	}
+	slog.Info("retry AI: success", "source", rec.SourcePath)
+	return nil
+}
+
+// WriteNoteError writes an error message into the Summary and OCR marker
+// blocks of the note associated with rec. It is called by the retry
+// scheduler when retries are exhausted or a non-retryable error occurs.
+func (i *Importer) WriteNoteError(rec state.Record, msg string) error {
+	noteAbs := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(rec.VaultNotePath))
+	existing, err := os.ReadFile(noteAbs)
+	if err != nil {
+		return fmt.Errorf("write note error: read %s: %w", noteAbs, err)
+	}
+	content := note.UpsertMarkerBlock(string(existing), "Summary", "summary", msg)
+	content = note.UpsertMarkerBlock(content, "OCR", "ocr", msg)
+	return os.WriteFile(noteAbs, []byte(content), 0o644)
+}
