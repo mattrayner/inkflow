@@ -13,7 +13,9 @@ type Config struct {
 	DefaultNoteDir string `toml:"default_note_dir" json:"default_note_dir"`
 	StateFile      string `toml:"state_file" json:"state_file"`
 
+	AI     AIConfig     `toml:"ai" json:"ai"`
 	Gemini GeminiConfig `toml:"gemini" json:"gemini"`
+	OpenAI OpenAIConfig `toml:"openai" json:"openai"`
 	Routes []Route      `toml:"route" json:"route"`
 }
 
@@ -44,4 +46,16 @@ type RetryConfig struct {
 	MaxRetries      int           `toml:"max_retries" json:"max_retries"`
 	Backoff         string        `toml:"backoff" json:"backoff"`
 	BackoffDuration time.Duration `toml:"-" json:"-"`
+}
+
+type AIConfig struct {
+	Provider string `toml:"provider" json:"provider"`
+}
+
+type OpenAIConfig struct {
+	APIKeyFile    string `toml:"api_key_file" json:"api_key_file"`
+	Model         string `toml:"model" json:"model"`
+	Timeout       string `toml:"timeout" json:"timeout"`
+	OCRPrompt     string `toml:"ocr_prompt" json:"ocr_prompt"`
+	SummaryPrompt string `toml:"summary_prompt" json:"summary_prompt"`
 }

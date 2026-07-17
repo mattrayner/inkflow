@@ -46,11 +46,14 @@ No fallback to default on template render error — import fails.
 | Var | Purpose |
 |-----|---------|
 | `GEMINI_API_KEY` | API key; takes precedence over `api_key_file`; empty string falls back to file |
+| `OPENAI_API_KEY` | API key; takes precedence over `api_key_file`; empty string falls back to file |
 | `WEBDAV_USER` / `WEBDAV_PASS` | Auth fallback if not in config |
 | `XDG_STATE_HOME` | Base for default state file path |
 | `SLOG_LEVEL` | Log level (`debug`, `info`, etc.) |
 
-If any route has `ai = true` and no API key is available at startup, server refuses to start.
+If any route has `ai = true` and no API key is available for the selected `[ai].provider` at startup, server refuses to start. Only the selected provider's key is checked.
+
+ChatGPT Plus/Pro/Codex subscription allowances cannot replace `OPENAI_API_KEY`; ChatGPT/Codex and the OpenAI API are separately billed. Inkflow supports only a standalone, pay-as-you-go OpenAI API key, not session, cookie, or subscription-based auth.
 
 ---
 
