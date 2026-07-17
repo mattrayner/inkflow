@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -18,17 +19,18 @@ func Load(path string) (*Config, string, error) {
 		return nil, "", err
 	}
 	var cfg Config
-	if _, err := toml.Decode(string(data), &cfg); err != nil {
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return nil, "", err
 	}
-	applyDefaults(&cfg)
+	applyDefaults(&cfg, md)
 	if err := validate(&cfg); err != nil {
 		return nil, "", err
 	}
 	return &cfg, filepath.Dir(abs), nil
 }
 
-func applyDefaults(cfg *Config) {
+func applyDefaults(cfg *Config, md toml.MetaData) {
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = "127.0.0.1:8080"
 	}
@@ -57,6 +59,16 @@ func applyDefaults(cfg *Config) {
 		cfg.Gemini.SummaryPrompt = "Summarize as 3-5 short bullets covering action items, decisions, deadlines, people. Use the source language. " +
 			"Plain bullets only — do not produce `[ ]` or `[x]` checkboxes. The reader maintains a separate TODO section elsewhere in the note."
 	}
+	// Retry defaults: only apply MaxRetries when the key was not explicitly
+	// set in the TOML source, so that max_retries = 0 is preserved for
+	// validation (e.g. rejected when enabled = true).
+	if !md.IsDefined("gemini", "retry", "max_retries") {
+		cfg.Gemini.Retry.MaxRetries = 3
+	}
+	if cfg.Gemini.Retry.Backoff == "" {
+		cfg.Gemini.Retry.Backoff = "30s"
+	}
+	// Enabled defaults to false (Go zero value); no explicit assignment needed.
 }
 
 func validate(cfg *Config) error {
@@ -67,6 +79,17 @@ func validate(cfg *Config) error {
 		if r.From == "" {
 			return fmt.Errorf("route.from is required")
 		}
+	}
+	d, err := time.ParseDuration(cfg.Gemini.Retry.Backoff)
+	if err != nil {
+		return fmt.Errorf("gemini.retry.backoff %q: %w", cfg.Gemini.Retry.Backoff, err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("gemini.retry.backoff must be a positive duration, got %q", cfg.Gemini.Retry.Backoff)
+	}
+	cfg.Gemini.Retry.BackoffDuration = d
+	if cfg.Gemini.Retry.Enabled && cfg.Gemini.Retry.MaxRetries < 1 {
+		return fmt.Errorf("gemini.retry.max_retries must be >= 1 when retry is enabled, got %d", cfg.Gemini.Retry.MaxRetries)
 	}
 	return nil
 }

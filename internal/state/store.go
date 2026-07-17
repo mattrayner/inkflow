@@ -11,6 +11,11 @@ import (
 	"go.etcd.io/bbolt"
 )
 
+const (
+	AIStatusSuccess = "success"
+	AIStatusFailed  = "failed"
+)
+
 var (
 	recordsBucket  = []byte("records")
 	errRecordFound = errors.New("record found")
@@ -28,6 +33,13 @@ type Record struct {
 	VaultPDFPath  string    `json:"vault_pdf_path"`
 	VaultNotePath string    `json:"vault_note_path"`
 	ImportedAt    time.Time `json:"imported_at"`
+
+	// AI processing state. Empty AIStatus means AI was not configured for this
+	// import. Existing records without these fields deserialise to zero values.
+	AIStatus      string    `json:"ai_status"`
+	AIRetryCount  int       `json:"ai_retry_count"`
+	AILastError   string    `json:"ai_last_error"`
+	AILastRetryAt time.Time `json:"ai_last_retry_at"`
 }
 
 func Open(path string) (*Store, error) {
@@ -112,4 +124,27 @@ func (s *Store) Save(previousSourcePath string, r *Record) error {
 		}
 		return nil
 	})
+}
+
+// GetFailedAIImports returns all records whose AIStatus is "failed".
+// It performs a full bucket scan. Records without an AIStatus field
+// (legacy records) deserialise to an empty string and are not returned.
+func (s *Store) GetFailedAIImports() ([]Record, error) {
+	var out []Record
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(recordsBucket).ForEach(func(_, v []byte) error {
+			var r Record
+			if err := json.Unmarshal(v, &r); err != nil {
+				return err
+			}
+			if r.AIStatus == AIStatusFailed {
+				out = append(out, r)
+			}
+			return nil
+		})
+	})
+	if out == nil {
+		out = []Record{}
+	}
+	return out, err
 }
