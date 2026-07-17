@@ -35,16 +35,25 @@ The resulting file as it appears in Obsidian.
 
 `template_dir`, if set, overrides the built-in templates in `internal/plan/templates`.
 
-### Gemini OCR + Summary
+### AI OCR + Summary
 
-When a route has `ai = true`, inkflow sends the whole PDF to the [Gemini 2.5 Flash](https://ai.google.dev/gemini-api/docs/models) API in a single call (inline; no client-side rasterization). The result is a note with two sections:
+When a route has `ai = true`, inkflow sends the whole PDF to the selected AI provider in a single call (inline; no client-side rasterization). Gemini and OpenAI are supported. Select one with `[ai].provider`, which defaults to `"gemini"`.
 
 - `## Summary` — short action-item bullets.
 - `## OCR` — faithful transcription of the handwritten content.
 
-**API key.** Provide the key via the `GEMINI_API_KEY` environment variable, or set `api_key_file` in the `[gemini]` block to a path inkflow reads at startup. The env var takes precedence.
+**API key.** Provide the selected provider's key via `GEMINI_API_KEY` or `OPENAI_API_KEY`, or set `api_key_file` in its `[gemini]` or `[openai]` block to a path inkflow reads at startup. The env var takes precedence.
 
-**Cost.** Gemini 2.5 Flash costs roughly **$0.005 per note** (a few pages, mixed text/drawing). Costs vary with page count and content density.
+**OpenAI billing.** ChatGPT Plus, Pro, and Codex subscription allowances **cannot** be used instead of API billing. Inkflow requires a standalone, separately billed `OPENAI_API_KEY` with pay-as-you-go OpenAI API access, exactly like it requires `GEMINI_API_KEY` today. There is no supported session, cookie, or subscription-based alternative, and none is planned: ChatGPT/Codex and the OpenAI API are separate products with no billing bridge.
+
+**Cost and quality.** These prices are approximate and subject to change; actual cost varies with page count and content density.
+
+| Model | Input $/1M tokens | Output $/1M tokens | Notes |
+|---|---:|---:|---|
+| Gemini 2.5 Flash | $0.30 | $2.50 | Native PDF support, cheapest well-rounded default |
+| Gemini 2.5 Flash-Lite | $0.10 | $0.40 | Cheapest; verify handwriting accuracy before relying on it |
+| OpenAI GPT-4.1 mini | ~$0.40 | ~$1.60 | Economical OpenAI option |
+| OpenAI GPT-4.1 | ~$2 | ~$8 | Higher quality/accuracy OpenAI option |
 
 **Privacy.** The paid Gemini API tier does not use your data for model training.
 
@@ -53,6 +62,9 @@ Example config with AI enabled on one route:
 ```toml
 vault_dir = "/home/anton/Obsidian"
 
+[ai]
+provider = "gemini" # "gemini" (default) or "openai"
+
 [gemini]
 # Reads $GEMINI_API_KEY; falls back to api_key_file if the env var is empty.
 api_key_file = "/run/secrets/gemini-api-key"
@@ -60,6 +72,14 @@ model = "gemini-3.5-flash"
 timeout = "60s"
 ocr_prompt = "Transcribe the handwritten page as clean readable Markdown. The goal is a document that reads well, not a pixel-accurate copy of paper layout. Join visually wrapped lines that belong to one sentence into a single flowing line. Do not preserve every line break from the paper. When the writer puts a single name or short phrase above a related cluster of items, render that header as a Markdown heading: `### Name`. Render dash, bullet, or arrow markers on the page as `-` list items. Use a blank line only between structural sections, not after every visual line wrap. Preserve visual markup: wrap text highlighted with a marker pen in `==text==`; wrap text inside a hand-drawn frame or box in `**text**` as a single bold span even if it wrapped across multiple lines; render hand-drawn checkboxes as `- [ ]` (empty) or `- [x]` (ticked). Keep the source language. Faithful transcription only — no translation, no summarization."
 summary_prompt = "Summarize as 3-5 short bullets covering action items, decisions, deadlines, people. Use the source language. Plain bullets only — do not produce `[ ]` or `[x]` checkboxes. The reader maintains a separate TODO section elsewhere in the note."
+
+[openai]
+# Used when provider = "openai". Reads $OPENAI_API_KEY; falls back to api_key_file.
+api_key_file = "/run/secrets/openai-api-key"
+model = "gpt-4.1"
+timeout = "60s"
+ocr_prompt = "Transcribe the handwritten page as clean readable Markdown."
+summary_prompt = "Summarize as 3-5 short bullets covering action items, decisions, deadlines, people."
 
 [[route]]
 from = "Syncs/"
@@ -71,7 +91,7 @@ template = "sync"
 ai = true
 ```
 
-Routes without `ai = true` skip the Gemini call entirely.
+Routes without `ai = true` skip the AI call entirely.
 
 ## Run
 

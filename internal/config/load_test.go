@@ -82,6 +82,87 @@ from = "Syncs/"
 	if cfg.Routes[0].AI {
 		t.Error("expected route.AI default false")
 	}
+	if cfg.AI.Provider != "gemini" {
+		t.Errorf("default provider = %q", cfg.AI.Provider)
+	}
+}
+
+func TestLoadParsesOpenAIProvider(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	body := `
+vault_dir = "/tmp/vault"
+
+[ai]
+provider = "openai"
+
+[[route]]
+from = "Syncs/"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AI.Provider != "openai" {
+		t.Errorf("provider = %q", cfg.AI.Provider)
+	}
+}
+
+func TestLoadRejectsUnknownAIProvider(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	body := `
+vault_dir = "/tmp/vault"
+
+[ai]
+provider = "bogus"
+
+[[route]]
+from = "Syncs/"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), `ai.provider must be "gemini" or "openai", got "bogus"`) {
+		t.Errorf("error = %q", err)
+	}
+}
+
+func TestLoadAppliesOpenAIDefaultsWhenBlockOmitted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	body := `
+vault_dir = "/tmp/vault"
+
+[[route]]
+from = "Syncs/"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenAI.Model != "gpt-4.1" {
+		t.Errorf("default model = %q", cfg.OpenAI.Model)
+	}
+	if cfg.OpenAI.Timeout != "60s" {
+		t.Errorf("default timeout = %q", cfg.OpenAI.Timeout)
+	}
+	if cfg.OpenAI.OCRPrompt != cfg.Gemini.OCRPrompt {
+		t.Error("default ocr_prompt does not match Gemini")
+	}
+	if cfg.OpenAI.SummaryPrompt != cfg.Gemini.SummaryPrompt {
+		t.Error("default summary_prompt does not match Gemini")
+	}
 }
 
 func TestLoadParsesRetryConfig(t *testing.T) {

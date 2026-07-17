@@ -34,6 +34,7 @@ func New(cfg *config.Config, store *state.Store, aiProvider ai.Provider) *Import
 }
 
 func (i *Importer) Import(ctx context.Context, input string, reader io.Reader, modTime time.Time) (*state.Record, error) {
+	slog.Default().Debug("import_started", "source", input)
 	if !strings.EqualFold(path.Ext(input), ".pdf") {
 		return nil, fmt.Errorf("not a pdf: %s", input)
 	}
@@ -50,6 +51,7 @@ func (i *Importer) Import(ctx context.Context, input string, reader io.Reader, m
 	if err != nil {
 		return nil, err
 	}
+	slog.Default().Debug("route_matched", "source", input, "pdf_rel", t.PDFRel, "note_rel", t.NoteRel, "template", t.Template, "ai", t.AI)
 	existing, err := i.lookupRecord(input, sha)
 	if err != nil {
 		return nil, err
@@ -137,8 +139,10 @@ func (i *Importer) persist(ctx context.Context, existing *state.Record, sourcePa
 
 	var summaryBody, ocrBody string
 	if t.AI && i.ai != nil {
+		slog.Default().Info("ai_called", "source", sourcePath, "sha256", sha)
 		res, err := i.ai.Process(ctx, bytes.NewReader(pdfData))
 		if err != nil {
+			slog.Default().Error("ai_failed", "source", sourcePath, "sha256", sha, "err", err)
 			msg := fmt.Sprintf("_AI failed: %s_", err.Error())
 			summaryBody, ocrBody = msg, msg
 			rec.AIStatus = state.AIStatusFailed
@@ -146,6 +150,7 @@ func (i *Importer) persist(ctx context.Context, existing *state.Record, sourcePa
 			rec.AILastError = err.Error()
 			rec.AILastRetryAt = time.Now().UTC()
 		} else {
+			slog.Default().Info("ai_succeeded", "source", sourcePath, "sha256", sha, "ocr_chars", len(res.OCR), "summary_bullets", len(res.Summary))
 			if res.OCR != "" {
 				ocrBody = res.OCR
 			} else {
@@ -161,18 +166,26 @@ func (i *Importer) persist(ctx context.Context, existing *state.Record, sourcePa
 			rec.AILastError = ""
 			rec.AILastRetryAt = time.Now().UTC()
 		}
+	} else if !t.AI {
+		slog.Default().Debug("ai_skipped", "source", sourcePath, "reason", "route_ai_disabled")
+	} else {
+		slog.Default().Debug("ai_skipped", "source", sourcePath, "reason", "no_provider_configured")
 	}
 
 	if err := i.writeNote(t, summaryBody, ocrBody); err != nil {
 		removeIfDistinct(previousPDFPath, pdfAbs)
 		removeIfDistinct(previousNotePath, noteAbs)
+		slog.Default().Error("note_write_failed", "source", sourcePath, "note", t.NoteRel, "err", err)
 		return nil, err
 	}
+	slog.Default().Debug("note_written", "note", noteAbs)
 	if err := i.saveRecord(previousSourcePath, rec); err != nil {
 		removeIfDistinct(previousPDFPath, pdfAbs)
 		removeIfDistinct(previousNotePath, noteAbs)
+		slog.Default().Error("state_save_failed", "source", sourcePath, "sha256", sha, "err", err)
 		return nil, err
 	}
+	slog.Default().Debug("state_saved", "source", sourcePath, "sha256", sha)
 	if previousPDFPath != "" && previousPDFPath != rec.VaultPDFPath {
 		_ = os.Remove(filepath.Join(i.cfg.VaultDir, filepath.FromSlash(previousPDFPath)))
 	}
@@ -226,7 +239,7 @@ func removeIfDistinct(oldPath, newPath string) {
 
 func logImported(sourcePath, notePath, pdfPath string) {
 	if logger := slog.Default(); logger != nil {
-		logger.Info("imported", "source", sourcePath, "note", notePath, "pdf", pdfPath)
+		logger.Info("import_completed", "source", sourcePath, "note", notePath, "pdf", pdfPath)
 	}
 }
 

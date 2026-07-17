@@ -13,6 +13,7 @@ import (
 
 	"inkflow/internal/ai"
 	"inkflow/internal/ai/gemini"
+	"inkflow/internal/ai/openai"
 	"inkflow/internal/config"
 	"inkflow/internal/importer"
 	"inkflow/internal/log"
@@ -90,21 +91,42 @@ func loadRuntime(logger *slog.Logger, configPath string) (runtime, error) {
 	}
 	var aiProvider ai.Provider
 	if anyRouteWantsAI(cfg.Routes) {
-		key, err := resolveAPIKey(cfg.Gemini)
-		if err != nil {
-			return runtime{}, err
+		switch cfg.AI.Provider {
+		case "", "gemini":
+			key, err := resolveGeminiAPIKey(cfg.Gemini)
+			if err != nil {
+				return runtime{}, err
+			}
+			timeout, err := time.ParseDuration(cfg.Gemini.Timeout)
+			if err != nil {
+				return runtime{}, fmt.Errorf("parse gemini timeout: %w", err)
+			}
+			aiProvider = gemini.New(gemini.ClientConfig{
+				APIKey:        key,
+				Model:         cfg.Gemini.Model,
+				Timeout:       timeout,
+				OCRPrompt:     cfg.Gemini.OCRPrompt,
+				SummaryPrompt: cfg.Gemini.SummaryPrompt,
+			})
+		case "openai":
+			key, err := resolveOpenAIAPIKey(cfg.OpenAI)
+			if err != nil {
+				return runtime{}, err
+			}
+			timeout, err := time.ParseDuration(cfg.OpenAI.Timeout)
+			if err != nil {
+				return runtime{}, fmt.Errorf("parse openai timeout: %w", err)
+			}
+			aiProvider = openai.New(openai.ClientConfig{
+				APIKey:        key,
+				Model:         cfg.OpenAI.Model,
+				Timeout:       timeout,
+				OCRPrompt:     cfg.OpenAI.OCRPrompt,
+				SummaryPrompt: cfg.OpenAI.SummaryPrompt,
+			})
+		default:
+			return runtime{}, fmt.Errorf("unknown AI provider: %q", cfg.AI.Provider)
 		}
-		timeout, err := time.ParseDuration(cfg.Gemini.Timeout)
-		if err != nil {
-			return runtime{}, fmt.Errorf("parse gemini timeout: %w", err)
-		}
-		aiProvider = gemini.New(gemini.ClientConfig{
-			APIKey:        key,
-			Model:         cfg.Gemini.Model,
-			Timeout:       timeout,
-			OCRPrompt:     cfg.Gemini.OCRPrompt,
-			SummaryPrompt: cfg.Gemini.SummaryPrompt,
-		})
 	}
 	store, err := state.Open(statePath)
 	if err != nil {
@@ -140,20 +162,28 @@ func anyRouteWantsAI(routes []config.Route) bool {
 	return false
 }
 
-func resolveAPIKey(cfg config.GeminiConfig) (string, error) {
-	if key := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); key != "" {
+func resolveGeminiAPIKey(cfg config.GeminiConfig) (string, error) {
+	return resolveAPIKey("gemini", "GEMINI_API_KEY", cfg.APIKeyFile)
+}
+
+func resolveOpenAIAPIKey(cfg config.OpenAIConfig) (string, error) {
+	return resolveAPIKey("openai", "OPENAI_API_KEY", cfg.APIKeyFile)
+}
+
+func resolveAPIKey(provider, envVar, keyFile string) (string, error) {
+	if key := strings.TrimSpace(os.Getenv(envVar)); key != "" {
 		return key, nil
 	}
-	if cfg.APIKeyFile != "" {
-		data, err := os.ReadFile(cfg.APIKeyFile)
+	if keyFile != "" {
+		data, err := os.ReadFile(keyFile)
 		if err != nil {
-			return "", fmt.Errorf("read %s: %w", cfg.APIKeyFile, err)
+			return "", fmt.Errorf("read %s: %w", keyFile, err)
 		}
 		if key := strings.TrimSpace(string(data)); key != "" {
 			return key, nil
 		}
 	}
-	return "", fmt.Errorf("gemini: no API key — set $GEMINI_API_KEY or [gemini].api_key_file")
+	return "", fmt.Errorf("%s: no API key — set $%s or [%s].api_key_file", provider, envVar, provider)
 }
 
 func newServeCmd() *cobra.Command {
