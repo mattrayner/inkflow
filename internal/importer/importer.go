@@ -396,8 +396,9 @@ func (i *Importer) writeNote(t plan.Result, summaryBody, ocrBody string) error {
 		}
 		content = body
 	}
-	content = note.UpsertMarkerBlock(content, "Summary", "summary", summaryBody)
-	content = note.UpsertMarkerBlock(content, "OCR", "ocr", ocrBody)
+	preserveFailure := strings.HasPrefix(summaryBody, "_AI failed:")
+	content = note.UpsertMarkerBlockWithFailurePolicy(content, "Summary", "summary", summaryBody, preserveFailure)
+	content = note.UpsertMarkerBlockWithFailurePolicy(content, "OCR", "ocr", ocrBody, preserveFailure)
 	return os.WriteFile(noteAbs, []byte(content), 0o644)
 }
 
@@ -481,7 +482,7 @@ func (i *Importer) WriteNoteError(rec state.Record, msg string) error {
 	if err != nil {
 		return fmt.Errorf("write note error: read %s: %w", noteAbs, err)
 	}
-	content := note.UpsertMarkerBlock(string(existing), "Summary", "summary", msg)
-	content = note.UpsertMarkerBlock(content, "OCR", "ocr", msg)
+	content := note.UpsertMarkerBlockWithFailurePolicy(string(existing), "Summary", "summary", msg, true)
+	content = note.UpsertMarkerBlockWithFailurePolicy(content, "OCR", "ocr", msg, true)
 	return os.WriteFile(noteAbs, []byte(content), 0o644)
 }

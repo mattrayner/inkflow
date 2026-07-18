@@ -27,3 +27,18 @@ func TestUpdateTagsAddsFrontmatter(t *testing.T) {
 		t.Fatalf("body changed:\n%s", got)
 	}
 }
+
+func TestUpdateTagsMergesExistingTagsInStableOrder(t *testing.T) {
+	got := UpdateTags("---\ntags:\n  - manual\n  - project\n---\nBody\n", []string{"project", "meeting", "manual"})
+	want := "tags:\n    - manual\n    - project\n    - meeting"
+	if !strings.Contains(got, want) {
+		t.Fatalf("merged tags missing from %q", got)
+	}
+}
+
+func TestUpdateTagsReplaceStrategy(t *testing.T) {
+	got := UpdateTagsWithStrategy("---\ntags:\n  - manual\n---\nBody\n", []string{"project", "project"}, "replace")
+	if strings.Contains(got, "manual") || !strings.Contains(got, "- project") {
+		t.Fatalf("replace tags = %q", got)
+	}
+}
