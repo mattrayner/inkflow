@@ -265,6 +265,20 @@ func TestImportRelocatesHashMatchedRenameWithoutAI(t *testing.T) {
 	if rec.SourcePath != secondSource || rec.VaultPDFPath != "pdfs/2026-06-04-renamed.pdf" || rec.VaultNotePath != "notes/2026-06-04 renamed.md" {
 		t.Fatalf("relocated record = %+v", rec)
 	}
+	stored, err := imp.store.GetBySourcePath(secondSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored == nil || stored.VaultPDFPath != rec.VaultPDFPath || stored.VaultNotePath != rec.VaultNotePath {
+		t.Fatalf("stored relocated record = %+v", stored)
+	}
+	oldRecord, err := imp.store.GetBySourcePath(firstSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldRecord != nil {
+		t.Fatalf("old source record remains after relocation: %+v", oldRecord)
+	}
 }
 
 func TestImportHashRelocationRejectsDestinationCollision(t *testing.T) {
