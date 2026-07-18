@@ -13,14 +13,16 @@ import (
 )
 
 type Result struct {
-	SourcePath string
-	PDFRel     string
-	NoteRel    string
-	Title      string
-	Date       time.Time
-	Template   string
-	Tags       []string
-	AI         bool
+	SourcePath                string
+	PDFRel                    string
+	NoteRel                   string
+	Title                     string
+	Date                      time.Time
+	Template                  string
+	Tags                      []string
+	AI                        bool
+	TagMergeStrategy          string
+	PreserveMarkerOnAIFailure bool
 }
 
 var ErrNoRoute = errors.New("no route matches")
@@ -57,15 +59,25 @@ func Build(routes []config.Route, defaults *config.Config, input string, now tim
 	ext := strings.TrimPrefix(path.Ext(input), ".")
 	pdfPattern := RenderPattern(pdfName, date, title, slug, ext)
 	notePattern := RenderPattern(noteName, date, title, slug, ext)
+	tagMergeStrategy := r.TagMergeStrategy
+	if tagMergeStrategy == "" {
+		tagMergeStrategy = "merge"
+	}
+	preserveMarkerOnAIFailure := true
+	if r.PreserveMarkerOnAIFailure != nil {
+		preserveMarkerOnAIFailure = *r.PreserveMarkerOnAIFailure
+	}
 	return Result{
-		SourcePath: input,
-		PDFRel:     util.SlashPath(r.PDFDir, pdfPattern),
-		NoteRel:    util.SlashPath(r.NoteDir, notePattern),
-		Title:      title,
-		Date:       date,
-		Template:   r.Template,
-		Tags:       tags,
-		AI:         r.AI,
+		SourcePath:                input,
+		PDFRel:                    util.SlashPath(r.PDFDir, pdfPattern),
+		NoteRel:                   util.SlashPath(r.NoteDir, notePattern),
+		Title:                     title,
+		Date:                      date,
+		Template:                  r.Template,
+		Tags:                      tags,
+		AI:                        r.AI,
+		TagMergeStrategy:          tagMergeStrategy,
+		PreserveMarkerOnAIFailure: preserveMarkerOnAIFailure,
 	}, nil
 }
 

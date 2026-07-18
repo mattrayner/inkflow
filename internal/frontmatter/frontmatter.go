@@ -16,7 +16,7 @@ func UpdateTags(content string, tags []string) string {
 // UpdateTagsWithStrategy updates tags using either merge or replace semantics.
 func UpdateTagsWithStrategy(content string, tags []string, strategy string) string {
 	uniq := uniqueTags(tags)
-	if len(uniq) == 0 {
+	if len(uniq) == 0 && strategy != "replace" {
 		return content
 	}
 	front, body, ok := splitFrontmatter(content)
@@ -27,7 +27,7 @@ func UpdateTagsWithStrategy(content string, tags []string, strategy string) stri
 	if err != nil {
 		return renderWithFrontmatter(content, uniq)
 	}
-	if strategy == "merge" {
+	if strategy != "replace" {
 		uniq = mergeTags(existingTags(doc), uniq)
 	}
 	replaceTags(doc, uniq)

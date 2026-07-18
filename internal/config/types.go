@@ -27,6 +27,12 @@ type Route struct {
 	PDFName  string `toml:"pdf_name" json:"pdf_name"`
 	Template string `toml:"template" json:"template"`
 	AI       bool   `toml:"ai" json:"ai"`
+	// TagMergeStrategy is "merge" by default; "replace" retains the legacy
+	// filename-authoritative tag behavior.
+	TagMergeStrategy string `toml:"tag_merge_strategy" json:"tag_merge_strategy"`
+	// Nil means the default true. A pointer distinguishes an omitted value from
+	// an explicit TOML false.
+	PreserveMarkerOnAIFailure *bool `toml:"preserve_marker_on_ai_failure" json:"preserve_marker_on_ai_failure"`
 }
 
 type GeminiConfig struct {
