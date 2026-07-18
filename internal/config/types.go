@@ -1,6 +1,10 @@
 package config
 
-import "time"
+import (
+	"path"
+	"strings"
+	"time"
+)
 
 type Config struct {
 	ListenAddr string `toml:"listen_addr" json:"listen_addr"`
@@ -17,6 +21,18 @@ type Config struct {
 	Gemini GeminiConfig `toml:"gemini" json:"gemini"`
 	OpenAI OpenAIConfig `toml:"openai" json:"openai"`
 	Routes []Route      `toml:"route" json:"route"`
+}
+
+// NormalizeRoutePrefix returns the canonical form used for route matching.
+func NormalizeRoutePrefix(prefix string) string {
+	prefix = strings.ReplaceAll(prefix, "\\", "/")
+	if prefix == "" {
+		return ""
+	}
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	return path.Clean(prefix) + "/"
 }
 
 type Route struct {

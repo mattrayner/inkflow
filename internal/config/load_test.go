@@ -403,3 +403,45 @@ from = "Syncs/"
 		t.Errorf("error does not mention non-negative constraint: %v", err)
 	}
 }
+
+func TestLoadRejectsNormalizedRouteCollisions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	body := `
+vault_dir = "/tmp/vault"
+
+[[route]]
+from = "/a"
+
+[[route]]
+from = "/a/"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := Load(path)
+	if err == nil {
+		t.Fatal("expected normalized route collision")
+	}
+	if !strings.Contains(err.Error(), "route 2") || !strings.Contains(err.Error(), "route 1") {
+		t.Errorf("collision error does not identify both routes: %v", err)
+	}
+}
+
+func TestLoadAllowsNestedRoutes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	body := `
+vault_dir = "/tmp/vault"
+
+[[route]]
+from = "/a/"
+
+[[route]]
+from = "/a/b/"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Load(path); err != nil {
+		t.Fatalf("nested routes should be valid: %v", err)
+	}
+}

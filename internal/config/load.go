@@ -98,10 +98,16 @@ func validate(cfg *Config) error {
 	if cfg.VaultDir == "" {
 		return fmt.Errorf("vault_dir is required")
 	}
-	for _, r := range cfg.Routes {
+	routeIndexes := make(map[string]int, len(cfg.Routes))
+	for i, r := range cfg.Routes {
 		if r.From == "" {
-			return fmt.Errorf("route.from is required")
+			return fmt.Errorf("route %d from is required", i+1)
 		}
+		normalized := NormalizeRoutePrefix(r.From)
+		if previous, ok := routeIndexes[normalized]; ok {
+			return fmt.Errorf("route %d from %q conflicts with route %d from %q after normalization to %q", i+1, r.From, previous+1, cfg.Routes[previous].From, normalized)
+		}
+		routeIndexes[normalized] = i
 	}
 	d, err := time.ParseDuration(cfg.Gemini.Retry.Backoff)
 	if err != nil {

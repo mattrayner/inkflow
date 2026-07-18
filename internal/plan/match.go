@@ -2,7 +2,6 @@ package plan
 
 import (
 	"fmt"
-	"path"
 	"strings"
 
 	"inkflow/internal/config"
@@ -15,12 +14,12 @@ type Match struct {
 }
 
 func Select(routes []config.Route, sourcePath string) (Match, error) {
-	sp := normalize(sourcePath)
+	sp := config.NormalizeRoutePrefix(sourcePath)
 	bestLen := -1
 	var best Match
 	ambiguous := false
 	for _, r := range routes {
-		from := normalize(r.From)
+		from := config.NormalizeRoutePrefix(r.From)
 		if from == "" || !strings.HasPrefix(sp, from) {
 			continue
 		}
@@ -38,15 +37,4 @@ func Select(routes []config.Route, sourcePath string) (Match, error) {
 		return Match{}, fmt.Errorf("ambiguous route match for %q", sourcePath)
 	}
 	return best, nil
-}
-
-func normalize(s string) string {
-	s = strings.ReplaceAll(s, "\\", "/")
-	if s == "" {
-		return ""
-	}
-	if !strings.HasSuffix(s, "/") {
-		s += "/"
-	}
-	return path.Clean(s) + "/"
 }

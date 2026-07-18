@@ -17,6 +17,7 @@ import (
 	"inkflow/internal/config"
 	"inkflow/internal/importer"
 	"inkflow/internal/log"
+	"inkflow/internal/plan"
 	"inkflow/internal/retry"
 	"inkflow/internal/state"
 	"inkflow/internal/webdavserver"
@@ -71,7 +72,83 @@ func newRootCmd(logger *slog.Logger) *cobra.Command {
 	cmd.PersistentFlags().StringVarP(&configPath, "config", "c", "inkflow.toml", "config file")
 	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newServeCmd())
+	cmd.AddCommand(newCheckCmd(&configPath))
 	return cmd
+}
+
+func newCheckCmd(configPath *string) *cobra.Command {
+	var sampleFilename string
+	cmd := &cobra.Command{
+		Use:   "check",
+		Short: "Check configuration and filesystem prerequisites",
+		Args:  cobra.NoArgs,
+		// Checking must not construct a runtime, open state, or start a server.
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return nil },
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, _, err := config.Load(*configPath)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintln(out, "Resolved routes:")
+			for i, route := range cfg.Routes {
+				fmt.Fprintf(out, "  %d: %s (pdf_dir=%q note_dir=%q ai=%t)\n", i+1, config.NormalizeRoutePrefix(route.From), route.PDFDir, route.NoteDir, route.AI)
+			}
+
+			var findings []string
+			if err := checkDirectory("vault_dir", cfg.VaultDir); err != nil {
+				findings = append(findings, err.Error())
+			}
+			if cfg.TemplateDir != "" {
+				if err := checkDirectory("template_dir", cfg.TemplateDir); err != nil {
+					findings = append(findings, err.Error())
+				}
+			}
+			if anyRouteWantsAI(cfg.Routes) {
+				if cfg.AI.Provider == "openai" {
+					_, err = resolveOpenAIAPIKey(cfg.OpenAI)
+				} else {
+					_, err = resolveGeminiAPIKey(cfg.Gemini)
+				}
+				if err != nil {
+					findings = append(findings, err.Error())
+				}
+			}
+			if sampleFilename != "" {
+				result, err := plan.Build(cfg.Routes, cfg, sampleFilename, time.Now().UTC())
+				if err != nil {
+					findings = append(findings, fmt.Sprintf("sample filename: %v", err))
+				} else {
+					match, _ := plan.Select(cfg.Routes, sampleFilename)
+					fmt.Fprintf(out, "Sample plan:\n  route: %s\n  PDFRel: %s\n  NoteRel: %s\n  tags: %v\n  date: %s\n  title: %s\n", config.NormalizeRoutePrefix(match.Route.From), result.PDFRel, result.NoteRel, result.Tags, result.Date.Format("2006-01-02"), result.Title)
+				}
+			}
+			if len(findings) > 0 {
+				for _, finding := range findings {
+					fmt.Fprintf(out, "FAIL: %s\n", finding)
+				}
+				return fmt.Errorf("preflight failed")
+			}
+			fmt.Fprintln(out, "Preflight successful.")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&sampleFilename, "sample-filename", "", "sample filename to plan")
+	return cmd
+}
+
+func checkDirectory(name, dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("%s %q: %w", name, dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s %q is not a directory", name, dir)
+	}
+	if info.Mode().Perm()&0222 == 0 {
+		return fmt.Errorf("%s %q is not writable", name, dir)
+	}
+	return nil
 }
 
 func loadRuntime(logger *slog.Logger, configPath string) (runtime, error) {
