@@ -28,6 +28,8 @@ type Importer struct {
 	store                *state.Store
 	ai                   ai.Provider
 	minReprocessInterval time.Duration
+	writeNoteFn          func(plan.Result, string, string) error
+	saveRecordFn         func(string, *state.Record) error
 }
 
 func New(cfg *config.Config, store *state.Store, aiProvider ai.Provider, minReprocessInterval time.Duration) *Importer {
@@ -173,8 +175,12 @@ func (i *Importer) persist(ctx context.Context, existing *state.Record, sourcePa
 	previousNotePath := ""
 	if existing != nil {
 		previousSourcePath = existing.SourcePath
-		previousPDFPath = existing.VaultPDFPath
-		previousNotePath = existing.VaultNotePath
+		previousPDFPath = filepath.Join(i.cfg.VaultDir, filepath.FromSlash(existing.VaultPDFPath))
+		previousNotePath = filepath.Join(i.cfg.VaultDir, filepath.FromSlash(existing.VaultNotePath))
+		// Retry history describes this source record's lifecycle and deliberately
+		// survives replacement with the newly imported metadata.
+		rec.AIRetryCount = existing.AIRetryCount
+		rec.AILastSuccessAt = existing.AILastSuccessAt
 		*existing = *rec
 		rec = existing
 	}
@@ -215,25 +221,25 @@ func (i *Importer) persist(ctx context.Context, existing *state.Record, sourcePa
 		slog.Default().Debug("ai_skipped", "source", sourcePath, "reason", "no_provider_configured")
 	}
 
-	if err := i.writeNote(t, summaryBody, ocrBody); err != nil {
+	if err := i.writeNoteOutput(t, summaryBody, ocrBody); err != nil {
 		removeIfDistinct(previousPDFPath, pdfAbs)
 		removeIfDistinct(previousNotePath, noteAbs)
 		slog.Default().Error("note_write_failed", "source", sourcePath, "note", t.NoteRel, "err", err)
 		return nil, err
 	}
 	slog.Default().Debug("note_written", "note", noteAbs)
-	if err := i.saveRecord(previousSourcePath, rec); err != nil {
+	if err := i.saveRecordOutput(previousSourcePath, rec); err != nil {
 		removeIfDistinct(previousPDFPath, pdfAbs)
 		removeIfDistinct(previousNotePath, noteAbs)
 		slog.Default().Error("state_save_failed", "source", sourcePath, "sha256", sha, "err", err)
 		return nil, err
 	}
 	slog.Default().Debug("state_saved", "source", sourcePath, "sha256", sha)
-	if previousPDFPath != "" && previousPDFPath != rec.VaultPDFPath {
-		_ = os.Remove(filepath.Join(i.cfg.VaultDir, filepath.FromSlash(previousPDFPath)))
+	if previousPDFPath != "" && previousPDFPath != pdfAbs {
+		_ = os.Remove(previousPDFPath)
 	}
-	if previousNotePath != "" && previousNotePath != rec.VaultNotePath {
-		_ = os.Remove(filepath.Join(i.cfg.VaultDir, filepath.FromSlash(previousNotePath)))
+	if previousNotePath != "" && previousNotePath != noteAbs {
+		_ = os.Remove(previousNotePath)
 	}
 	logImported(sourcePath, t.NoteRel, t.PDFRel)
 	return rec, nil
@@ -244,6 +250,20 @@ func (i *Importer) saveRecord(previousSourcePath string, rec *state.Record) erro
 		return i.store.Put(rec)
 	}
 	return i.store.Save(previousSourcePath, rec)
+}
+
+func (i *Importer) saveRecordOutput(previousSourcePath string, rec *state.Record) error {
+	if i.saveRecordFn != nil {
+		return i.saveRecordFn(previousSourcePath, rec)
+	}
+	return i.saveRecord(previousSourcePath, rec)
+}
+
+func (i *Importer) writeNoteOutput(t plan.Result, summaryBody, ocrBody string) error {
+	if i.writeNoteFn != nil {
+		return i.writeNoteFn(t, summaryBody, ocrBody)
+	}
+	return i.writeNote(t, summaryBody, ocrBody)
 }
 
 func (i *Importer) writeNote(t plan.Result, summaryBody, ocrBody string) error {
