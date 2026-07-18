@@ -29,6 +29,7 @@ type Config struct {
 	AI            AIConfig            `toml:"ai" json:"ai"`
 	Gemini        GeminiConfig        `toml:"gemini" json:"gemini"`
 	OpenAI        OpenAIConfig        `toml:"openai" json:"openai"`
+	Ollama        OllamaConfig        `toml:"ollama" json:"ollama"`
 	Observability ObservabilityConfig `toml:"observability" json:"observability"`
 	Routes        []Route             `toml:"route" json:"route"`
 }
@@ -105,6 +106,16 @@ type AIConfig struct {
 
 type OpenAIConfig struct {
 	APIKeyFile    string `toml:"api_key_file" json:"api_key_file"`
+	Model         string `toml:"model" json:"model"`
+	Timeout       string `toml:"timeout" json:"timeout"`
+	OCRPrompt     string `toml:"ocr_prompt" json:"ocr_prompt"`
+	SummaryPrompt string `toml:"summary_prompt" json:"summary_prompt"`
+}
+
+// OllamaConfig configures a local Ollama vision model. Unlike cloud
+// providers, Ollama does not require an API key.
+type OllamaConfig struct {
+	BaseURL       string `toml:"base_url" json:"base_url"`
 	Model         string `toml:"model" json:"model"`
 	Timeout       string `toml:"timeout" json:"timeout"`
 	OCRPrompt     string `toml:"ocr_prompt" json:"ocr_prompt"`
