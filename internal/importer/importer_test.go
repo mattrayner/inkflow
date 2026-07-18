@@ -16,6 +16,7 @@ import (
 
 	"inkflow/internal/ai"
 	"inkflow/internal/config"
+	"inkflow/internal/plan"
 	"inkflow/internal/state"
 )
 
@@ -152,6 +153,78 @@ func importDebouncePDF(t *testing.T, imp *Importer, contents string) *state.Reco
 func hashString(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
+}
+
+func TestPersistSamePathWriteNoteFailurePreservesOutputs(t *testing.T) {
+	imp, existing, target, pdfPath, notePath := newRollbackTestImport(t, "pdfs/new.pdf", "notes/new.md")
+	imp.writeNoteFn = func(plan.Result, string, string) error { return errors.New("write note") }
+
+	if _, err := imp.persist(context.Background(), existing, "Syncs/note.pdf", time.Now(), "new", target, []byte("new pdf")); err == nil {
+		t.Fatal("persist succeeded")
+	}
+	assertPathExists(t, pdfPath)
+	assertPathExists(t, notePath)
+}
+
+func TestPersistSamePathSaveFailurePreservesOutputsAndRetryState(t *testing.T) {
+	imp, existing, target, pdfPath, notePath := newRollbackTestImport(t, "pdfs/new.pdf", "notes/new.md")
+	lastSuccess := time.Now().Add(-time.Hour).UTC()
+	existing.AIRetryCount = 3
+	existing.AILastSuccessAt = lastSuccess
+	imp.saveRecordFn = func(string, *state.Record) error { return errors.New("save record") }
+
+	if _, err := imp.persist(context.Background(), existing, "Syncs/note.pdf", time.Now(), "new", target, []byte("new pdf")); err == nil {
+		t.Fatal("persist succeeded")
+	}
+	assertPathExists(t, pdfPath)
+	assertPathExists(t, notePath)
+	if existing.AIRetryCount != 3 || !existing.AILastSuccessAt.Equal(lastSuccess) {
+		t.Fatalf("retry state was not preserved: %+v", existing)
+	}
+}
+
+func TestPersistMovedRouteSaveFailureRemovesNewOutputs(t *testing.T) {
+	imp, existing, target, oldPDFPath, oldNotePath := newRollbackTestImport(t, "pdfs/old.pdf", "notes/old.md")
+	target.PDFRel = "moved/new.pdf"
+	target.NoteRel = "moved/new.md"
+	imp.saveRecordFn = func(string, *state.Record) error { return errors.New("save record") }
+
+	if _, err := imp.persist(context.Background(), existing, "Syncs/note.pdf", time.Now(), "new", target, []byte("new pdf")); err == nil {
+		t.Fatal("persist succeeded")
+	}
+	assertPathExists(t, oldPDFPath)
+	assertPathExists(t, oldNotePath)
+	assertPathMissing(t, filepath.Join(imp.cfg.VaultDir, target.PDFRel))
+	assertPathMissing(t, filepath.Join(imp.cfg.VaultDir, target.NoteRel))
+}
+
+func newRollbackTestImport(t *testing.T, pdfRel, noteRel string) (*Importer, *state.Record, plan.Result, string, string) {
+	t.Helper()
+	imp, _ := newTestImporter(t, nil, false)
+	for rel, contents := range map[string]string{pdfRel: "old pdf", noteRel: "old note"} {
+		filePath := filepath.Join(imp.cfg.VaultDir, rel)
+		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filePath, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return imp, &state.Record{SourcePath: "Syncs/note.pdf", VaultPDFPath: pdfRel, VaultNotePath: noteRel}, plan.Result{PDFRel: pdfRel, NoteRel: noteRel, Date: time.Now()}, filepath.Join(imp.cfg.VaultDir, pdfRel), filepath.Join(imp.cfg.VaultDir, noteRel)
+}
+
+func assertPathExists(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected %s to exist: %v", path, err)
+	}
+}
+
+func assertPathMissing(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected %s to be absent, got %v", path, err)
+	}
 }
 
 func TestImportAISuccessRecordsLastSuccessAt(t *testing.T) {
