@@ -13,6 +13,7 @@ import (
 
 	"inkflow/internal/ai"
 	"inkflow/internal/ai/gemini"
+	"inkflow/internal/ai/ollama"
 	"inkflow/internal/ai/openai"
 	"inkflow/internal/config"
 	"inkflow/internal/importer"
@@ -108,10 +109,13 @@ func newCheckCmd(configPath *string) *cobra.Command {
 				}
 			}
 			if anyRouteWantsAI(cfg.Routes) {
-				if cfg.AI.Provider == "openai" {
+				switch cfg.AI.Provider {
+				case "openai":
 					_, err = resolveOpenAIAPIKey(cfg.OpenAI)
-				} else {
+				case "gemini", "":
 					_, err = resolveGeminiAPIKey(cfg.Gemini)
+				case "ollama":
+					// Local Ollama instances do not require API credentials.
 				}
 				if err != nil {
 					findings = append(findings, err.Error())
@@ -203,6 +207,18 @@ func loadRuntime(logger *slog.Logger, configPath string) (runtime, error) {
 				Timeout:       timeout,
 				OCRPrompt:     cfg.OpenAI.OCRPrompt,
 				SummaryPrompt: cfg.OpenAI.SummaryPrompt,
+			})
+		case "ollama":
+			timeout, err := time.ParseDuration(cfg.Ollama.Timeout)
+			if err != nil {
+				return runtime{}, fmt.Errorf("parse ollama timeout: %w", err)
+			}
+			aiProvider = ollama.New(ollama.ClientConfig{
+				BaseURL:       cfg.Ollama.BaseURL,
+				Model:         cfg.Ollama.Model,
+				Timeout:       timeout,
+				OCRPrompt:     cfg.Ollama.OCRPrompt,
+				SummaryPrompt: cfg.Ollama.SummaryPrompt,
 			})
 		default:
 			return runtime{}, fmt.Errorf("unknown AI provider: %q", cfg.AI.Provider)

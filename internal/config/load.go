@@ -97,6 +97,18 @@ func applyDefaults(cfg *Config, md toml.MetaData) {
 	if cfg.OpenAI.SummaryPrompt == "" {
 		cfg.OpenAI.SummaryPrompt = defaultSummaryPrompt
 	}
+	if cfg.Ollama.BaseURL == "" {
+		cfg.Ollama.BaseURL = "http://localhost:11434"
+	}
+	if cfg.Ollama.Timeout == "" {
+		cfg.Ollama.Timeout = "60s"
+	}
+	if cfg.Ollama.OCRPrompt == "" {
+		cfg.Ollama.OCRPrompt = defaultOCRPrompt
+	}
+	if cfg.Ollama.SummaryPrompt == "" {
+		cfg.Ollama.SummaryPrompt = defaultSummaryPrompt
+	}
 	for index := range cfg.Routes {
 		if cfg.Routes[index].TagMergeStrategy == "" {
 			cfg.Routes[index].TagMergeStrategy = "merge"
@@ -151,8 +163,11 @@ func validate(cfg *Config) error {
 	if cfg.Gemini.Retry.Enabled && cfg.Gemini.Retry.MaxRetries < 1 {
 		return fmt.Errorf("gemini.retry.max_retries must be >= 1 when retry is enabled, got %d", cfg.Gemini.Retry.MaxRetries)
 	}
-	if cfg.AI.Provider != "gemini" && cfg.AI.Provider != "openai" {
-		return fmt.Errorf("ai.provider must be \"gemini\" or \"openai\", got %q", cfg.AI.Provider)
+	if cfg.AI.Provider != "gemini" && cfg.AI.Provider != "openai" && cfg.AI.Provider != "ollama" {
+		return fmt.Errorf("ai.provider must be \"gemini\", \"openai\", or \"ollama\", got %q", cfg.AI.Provider)
+	}
+	if cfg.AI.Provider == "ollama" && cfg.Ollama.Model == "" {
+		return fmt.Errorf("ollama.model is required when ai.provider is \"ollama\"")
 	}
 	for _, timeout := range []struct {
 		name  string
