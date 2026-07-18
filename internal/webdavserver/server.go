@@ -2,8 +2,12 @@ package webdavserver
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/xml"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,6 +18,9 @@ import (
 	"inkflow/internal/config"
 	"inkflow/internal/importer"
 )
+
+const shutdownTimeout = 10 * time.Second
+const defaultMaxUploadBytes int64 = 100 * 1024 * 1024
 
 type Server struct {
 	cfg    *config.Config
@@ -29,11 +36,14 @@ func Serve(ctx context.Context, cfg *config.Config, imp *importer.Importer, logg
 		cfg.WebDAVPass = os.Getenv("WEBDAV_PASS")
 	}
 	srv := &Server{cfg: cfg, imp: imp, logger: logger}
-	httpSrv := &http.Server{Addr: cfg.ListenAddr, Handler: srv}
+	if cfg.WebDAVUser == "" && cfg.WebDAVPass == "" && !isLoopbackListenAddr(cfg.ListenAddr) {
+		srv.warn("UNSAFE WEBDAV CONFIGURATION: unauthenticated plaintext vault writes are reachable on a non-loopback address; configure credentials and use TLS via a reverse proxy", "listen_addr", cfg.ListenAddr)
+	}
+	httpSrv := newHTTPServer(cfg, srv)
 
 	go func() {
 		<-ctx.Done()
-		_ = httpSrv.Shutdown(context.Background())
+		srv.shutdown(httpSrv)
 	}()
 
 	srv.info("webdav server starting", "listen_addr", cfg.ListenAddr)
@@ -71,7 +81,11 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	user, pass, ok := r.BasicAuth()
-	if ok && user == s.cfg.WebDAVUser && pass == s.cfg.WebDAVPass {
+	configuredUser := sha256.Sum256([]byte(s.cfg.WebDAVUser))
+	suppliedUser := sha256.Sum256([]byte(user))
+	configuredPass := sha256.Sum256([]byte(s.cfg.WebDAVPass))
+	suppliedPass := sha256.Sum256([]byte(pass))
+	if ok && subtle.ConstantTimeCompare(suppliedUser[:], configuredUser[:]) == 1 && subtle.ConstantTimeCompare(suppliedPass[:], configuredPass[:]) == 1 {
 		return true
 	}
 	w.Header().Set("WWW-Authenticate", `Basic realm="inkflow"`)
@@ -84,8 +98,22 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, clean string)
 		http.Error(w, "missing path", http.StatusBadRequest)
 		return
 	}
-	rec, err := s.imp.Import(r.Context(), clean, r.Body, time.Now().UTC())
+	maxUploadBytes := s.cfg.MaxUploadBytes
+	if maxUploadBytes == 0 {
+		maxUploadBytes = defaultMaxUploadBytes
+	}
+	if r.ContentLength > maxUploadBytes {
+		http.Error(w, "upload too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	body := http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	rec, err := s.imp.Import(r.Context(), clean, body, time.Now().UTC())
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, "upload too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		s.error("webdav import failed", "path", clean, "err", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -150,6 +178,44 @@ func (s *Server) info(msg string, args ...any) {
 func (s *Server) error(msg string, args ...any) {
 	if s != nil && s.logger != nil {
 		s.logger.Error(msg, args...)
+	}
+}
+
+func (s *Server) warn(msg string, args ...any) {
+	if s != nil && s.logger != nil {
+		s.logger.Warn(msg, args...)
+	}
+}
+
+func (s *Server) shutdown(httpSrv *http.Server) {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		s.error("webdav server shutdown failed", "err", err)
+	}
+}
+
+func isLoopbackListenAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	host = strings.Trim(host, "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func newHTTPServer(cfg *config.Config, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              cfg.ListenAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: cfg.ReadHeaderTimeoutDuration,
+		ReadTimeout:       cfg.ReadTimeoutDuration,
+		WriteTimeout:      cfg.WriteTimeoutDuration,
+		IdleTimeout:       cfg.IdleTimeoutDuration,
 	}
 }
 

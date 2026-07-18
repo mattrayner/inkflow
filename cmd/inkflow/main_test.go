@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -129,5 +130,70 @@ func TestAnyRouteWantsAIDetectsFlag(t *testing.T) {
 	}
 	if anyRouteWantsAI([]config.Route{{AI: false}, {AI: false}}) {
 		t.Error("no AI routes should not enable provider")
+	}
+}
+
+func TestCheckCommandSuccessAndSamplePreview(t *testing.T) {
+	dir := t.TempDir()
+	vault := filepath.Join(dir, "vault")
+	templates := filepath.Join(dir, "templates")
+	if err := os.Mkdir(vault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(templates, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "inkflow.toml")
+	body := "vault_dir = \"" + vault + "\"\ntemplate_dir = \"" + templates + "\"\n\n[[route]]\nfrom = \"/uploads\"\n"
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := newRootCmd(slog.Default())
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"--config", configPath, "check", "--sample-filename", "/uploads/2026-05-06 Meeting [finance].pdf"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{"Resolved routes:", "PDFRel:", "NoteRel:", "tags: [finance]", "title: Meeting", "Preflight successful."} {
+		if !strings.Contains(text, want) {
+			t.Errorf("output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestCheckCommandReportsPreflightFailures(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "inkflow.toml")
+	body := "vault_dir = \"" + filepath.Join(dir, "missing") + "\"\n\n[[route]]\nfrom = \"/uploads\"\nai = true\n"
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := newRootCmd(slog.Default())
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"--config", configPath, "check"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected preflight failure")
+	}
+	text := out.String()
+	if !strings.Contains(text, "vault_dir") || !strings.Contains(text, "GEMINI_API_KEY") {
+		t.Errorf("missing diagnostics:\n%s", text)
+	}
+}
+
+func TestCheckCommandReturnsLoadErrorForRouteCollision(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "inkflow.toml")
+	body := "vault_dir = \"" + dir + "\"\n\n[[route]]\nfrom = \"/a\"\n\n[[route]]\nfrom = \"/a/\"\n"
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := newRootCmd(slog.Default())
+	root.SetArgs([]string{"--config", configPath, "check"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("expected collision load error, got %v", err)
 	}
 }
