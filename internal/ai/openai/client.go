@@ -71,7 +71,10 @@ func (c *Client) Process(ctx context.Context, pdf io.Reader) (ai.Result, error) 
 		return ai.Result{}, fmt.Errorf("read response body: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return ai.Result{}, fmt.Errorf("openai %d: %s", resp.StatusCode, extractErrorMessage(respBody))
+		return ai.Result{}, fmt.Errorf("openai %w", &ai.APIError{
+			StatusCode: resp.StatusCode,
+			Message:    extractErrorMessage(respBody),
+		})
 	}
 
 	return parseResponse(respBody)
