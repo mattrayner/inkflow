@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"inkflow/internal/ai"
 )
 
 func newTestClient(t *testing.T, handler http.HandlerFunc) (*Client, *httptest.Server) {
@@ -95,6 +98,48 @@ func TestProcessAuthFailure(t *testing.T) {
 	}
 	if err.Error() != "openai 401: API key invalid" {
 		t.Fatalf("expected clean error message, got: %v", err)
+	}
+	var apiErr *ai.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatal("expected shared ai.APIError")
+	}
+	if apiErr.StatusCode != http.StatusUnauthorized || apiErr.Message != "API key invalid" {
+		t.Errorf("APIError = %#v, want status 401 and message %q", apiErr, "API key invalid")
+	}
+}
+
+func TestProcessAPIErrorRetryability(t *testing.T) {
+	tests := []struct {
+		status int
+		want   bool
+	}{
+		{http.StatusBadRequest, false},
+		{http.StatusUnauthorized, false},
+		{http.StatusForbidden, false},
+		{http.StatusTooManyRequests, true},
+		{http.StatusInternalServerError, true},
+	}
+	for _, tt := range tests {
+		t.Run(http.StatusText(tt.status), func(t *testing.T) {
+			c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(`{"error":{"message":"provider error"}}`))
+			})
+			_, err := c.Process(context.Background(), bytes.NewReader([]byte("x")))
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			var apiErr *ai.APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatal("expected shared ai.APIError")
+			}
+			if apiErr.StatusCode != tt.status {
+				t.Errorf("status = %d, want %d", apiErr.StatusCode, tt.status)
+			}
+			if got := ai.IsRetryable(err); got != tt.want {
+				t.Errorf("ai.IsRetryable(%v) = %v, want %v", err, got, tt.want)
+			}
+		})
 	}
 }
 
