@@ -609,9 +609,28 @@ func TestPutMetadataOnlyPDFChangeSkipsAICall(t *testing.T) {
 		if rec.Code != 201 {
 			t.Fatalf("attempt %d: status = %d body=%s", n, rec.Code, rec.Body.String())
 		}
+		if n == 0 {
+			// Simulate the async worker having already processed the first
+			// upload, so a subsequent metadata-only re-export can be checked
+			// for whether it left the AI outcome alone (skip) or requeued it.
+			stored, err := store.GetBySourcePath("Syncs/2026-06-04 stable.pdf")
+			if err != nil || stored == nil {
+				t.Fatalf("GetBySourcePath after first upload: %v", err)
+			}
+			stored.AIStatus = state.AIStatusSuccess
+			stored.AILastSuccessAt = time.Now().UTC()
+			if err := store.Put(stored); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+		}
 	}
-	if calls != 1 {
-		t.Fatalf("expected metadata-only re-export to skip AI, got %d calls", calls)
+
+	stored, err := store.GetBySourcePath("Syncs/2026-06-04 stable.pdf")
+	if err != nil || stored == nil {
+		t.Fatalf("GetBySourcePath: %v", err)
+	}
+	if stored.AIStatus != state.AIStatusSuccess {
+		t.Fatalf("expected metadata-only re-export to leave AI outcome untouched, got AIStatus=%q", stored.AIStatus)
 	}
 }
 
@@ -644,8 +663,27 @@ func TestPutActualPDFContentChangeCallsAIAgain(t *testing.T) {
 		if rec.Code != 201 {
 			t.Fatalf("attempt %d: status = %d body=%s", n, rec.Code, rec.Body.String())
 		}
+		if n == 0 {
+			// Simulate the async worker having already processed the first
+			// upload; a genuine content change on the second upload must
+			// requeue AI work (AIStatus back to pending).
+			stored, err := store.GetBySourcePath("Syncs/2026-06-04 changed.pdf")
+			if err != nil || stored == nil {
+				t.Fatalf("GetBySourcePath after first upload: %v", err)
+			}
+			stored.AIStatus = state.AIStatusSuccess
+			stored.AILastSuccessAt = time.Now().UTC()
+			if err := store.Put(stored); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+		}
 	}
-	if calls != 2 {
-		t.Fatalf("expected real content change to call AI again, got %d calls", calls)
+
+	stored, err := store.GetBySourcePath("Syncs/2026-06-04 changed.pdf")
+	if err != nil || stored == nil {
+		t.Fatalf("GetBySourcePath: %v", err)
+	}
+	if stored.AIStatus != state.AIStatusPending {
+		t.Fatalf("expected real content change to requeue AI processing, got AIStatus=%q", stored.AIStatus)
 	}
 }
