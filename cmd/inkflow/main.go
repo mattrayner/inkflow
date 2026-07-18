@@ -85,9 +85,12 @@ func newCheckCmd(configPath *string) *cobra.Command {
 		// Checking must not construct a runtime, open state, or start a server.
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return nil },
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, _, err := config.Load(*configPath)
+			cfg, cfgDir, err := config.Load(*configPath)
 			if err != nil {
 				return err
+			}
+			if cfg.TemplateDir != "" && !filepath.IsAbs(cfg.TemplateDir) {
+				cfg.TemplateDir = filepath.Join(cfgDir, cfg.TemplateDir)
 			}
 			out := cmd.OutOrStdout()
 			fmt.Fprintln(out, "Resolved routes:")
