@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -175,6 +176,11 @@ func validate(cfg *Config) error {
 	}
 	if cfg.MaxUploadBytes <= 0 {
 		return fmt.Errorf("max_upload_bytes must be positive, got %d", cfg.MaxUploadBytes)
+	}
+	if cfg.Observability.MetricsAddr != "" {
+		if _, _, err := net.SplitHostPort(cfg.Observability.MetricsAddr); err != nil {
+			return fmt.Errorf("observability.metrics_addr %q: %w", cfg.Observability.MetricsAddr, err)
+		}
 	}
 	return nil
 }

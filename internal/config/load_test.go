@@ -513,6 +513,21 @@ func TestLoadParsesServerOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadParsesObservabilityConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	body := "vault_dir = \"/tmp/vault\"\n[observability]\nmetrics_enabled = true\nmetrics_addr = \"127.0.0.1:9090\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Observability.MetricsEnabled || cfg.Observability.MetricsAddr != "127.0.0.1:9090" {
+		t.Fatalf("observability = %+v", cfg.Observability)
+	}
+}
+
 func TestLoadRejectsInvalidServerLimits(t *testing.T) {
 	for name, setting := range map[string]string{"duration": "read_timeout = \"0s\"", "bytes": "max_upload_bytes = 0"} {
 		t.Run(name, func(t *testing.T) {

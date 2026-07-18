@@ -17,6 +17,7 @@ import (
 	"inkflow/internal/ai"
 	"inkflow/internal/config"
 	"inkflow/internal/importer"
+	"inkflow/internal/observability"
 	"inkflow/internal/state"
 )
 
@@ -25,6 +26,54 @@ func TestHTTPServerUsesConfiguredTimeouts(t *testing.T) {
 	httpSrv := newHTTPServer(cfg, http.NotFoundHandler())
 	if httpSrv.ReadHeaderTimeout != time.Second || httpSrv.ReadTimeout != 2*time.Second || httpSrv.WriteTimeout != 3*time.Second || httpSrv.IdleTimeout != 4*time.Second {
 		t.Errorf("unexpected timeouts: %+v", httpSrv)
+	}
+}
+
+func TestHealthDoesNotRequireAuthenticationAndChecksStore(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{WebDAVUser: "user", WebDAVPass: "pass"}
+	srv := &Server{cfg: cfg, store: store}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("healthy status = %d", rec.Code)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code == http.StatusOK {
+		t.Fatal("closed state store reported healthy")
+	}
+}
+
+func TestMetricsRequireMainListenerAuthentication(t *testing.T) {
+	cfg := &config.Config{WebDAVUser: "user", WebDAVPass: "pass", Observability: config.ObservabilityConfig{MetricsEnabled: true}}
+	srv := &Server{cfg: cfg, metrics: observability.New()}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated metrics status = %d", rec.Code)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.SetBasicAuth("user", "pass")
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "inkflow_state_records") {
+		t.Fatalf("metrics response = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMetricsDisabledIsNotExposed(t *testing.T) {
+	srv := &Server{cfg: &config.Config{}, metrics: observability.New()}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("disabled metrics status = %d", rec.Code)
 	}
 }
 

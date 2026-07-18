@@ -17,25 +17,29 @@ import (
 
 	"inkflow/internal/config"
 	"inkflow/internal/importer"
+	"inkflow/internal/observability"
+	"inkflow/internal/state"
 )
 
 const shutdownTimeout = 10 * time.Second
 const defaultMaxUploadBytes int64 = 100 * 1024 * 1024
 
 type Server struct {
-	cfg    *config.Config
-	imp    *importer.Importer
-	logger *slog.Logger
+	cfg     *config.Config
+	imp     *importer.Importer
+	store   *state.Store
+	metrics *observability.Metrics
+	logger  *slog.Logger
 }
 
-func Serve(ctx context.Context, cfg *config.Config, imp *importer.Importer, logger *slog.Logger) error {
+func Serve(ctx context.Context, cfg *config.Config, imp *importer.Importer, store *state.Store, metrics *observability.Metrics, logger *slog.Logger) error {
 	if cfg.WebDAVUser == "" {
 		cfg.WebDAVUser = os.Getenv("WEBDAV_USER")
 	}
 	if cfg.WebDAVPass == "" {
 		cfg.WebDAVPass = os.Getenv("WEBDAV_PASS")
 	}
-	srv := &Server{cfg: cfg, imp: imp, logger: logger}
+	srv := &Server{cfg: cfg, imp: imp, store: store, metrics: metrics, logger: logger}
 	if cfg.WebDAVUser == "" && cfg.WebDAVPass == "" && !isLoopbackListenAddr(cfg.ListenAddr) {
 		srv.warn("UNSAFE WEBDAV CONFIGURATION: unauthenticated plaintext vault writes are reachable on a non-loopback address; configure credentials and use TLS via a reverse proxy", "listen_addr", cfg.ListenAddr)
 	}
@@ -54,6 +58,17 @@ func Serve(ctx context.Context, cfg *config.Config, imp *importer.Importer, logg
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && r.URL.Path == "/healthz" {
+		s.handleHealth(w)
+		return
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/metrics" && s.cfg.Observability.MetricsEnabled && s.cfg.Observability.MetricsAddr == "" {
+		if !s.authorize(w, r) {
+			return
+		}
+		s.metrics.Handler().ServeHTTP(w, r)
+		return
+	}
 	if !s.authorize(w, r) {
 		return
 	}
@@ -94,7 +109,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, clean string) {
+	route := s.routeLabel(clean)
 	if clean == "" {
+		s.metrics.Import(route, "rejected")
 		http.Error(w, "missing path", http.StatusBadRequest)
 		return
 	}
@@ -103,23 +120,63 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, clean string)
 		maxUploadBytes = defaultMaxUploadBytes
 	}
 	if r.ContentLength > maxUploadBytes {
+		s.metrics.Import(route, "rejected")
 		http.Error(w, "upload too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	body := http.MaxBytesReader(w, r.Body, maxUploadBytes)
-	rec, err := s.imp.Import(r.Context(), clean, body, time.Now().UTC())
+	started := time.Now().UTC()
+	rec, err := s.imp.Import(r.Context(), clean, body, started)
 	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
+			s.metrics.Import(route, "rejected")
 			http.Error(w, "upload too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 		s.error("webdav import failed", "path", clean, "err", err)
+		s.metrics.Import(route, "failed")
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if rec.ImportedAt.Before(started) {
+		s.metrics.Import(route, "deduplicated")
+		s.metrics.DedupSkip()
+	} else {
+		s.metrics.Import(route, "succeeded")
+	}
 	s.info("webdav imported", "path", clean, "note", rec.VaultNotePath, "pdf", rec.VaultPDFPath)
 	w.WriteHeader(http.StatusCreated)
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter) {
+	if s.store == nil {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	pending, err := s.store.GetPendingAndFailedAIImports()
+	if err != nil {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if s.metrics != nil {
+		s.metrics.QueueDepth(len(pending))
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) routeLabel(clean string) string {
+	best := ""
+	for _, route := range s.cfg.Routes {
+		prefix := config.NormalizeRoutePrefix(route.From)
+		if strings.HasPrefix(clean+"/", strings.TrimPrefix(prefix, "/")) && len(prefix) > len(best) {
+			best = prefix
+		}
+	}
+	if best == "" {
+		return "unmatched"
+	}
+	return best
 }
 
 func (s *Server) handlePropfind(w http.ResponseWriter, r *http.Request, clean string) {
