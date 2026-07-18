@@ -77,6 +77,80 @@ func TestMetricsDisabledIsNotExposed(t *testing.T) {
 	}
 }
 
+func TestPropfindUsesVaultMetadataAndDepth(t *testing.T) {
+	vault := t.TempDir()
+	stamp := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	if err := os.Mkdir(filepath.Join(vault, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(vault, "docs", "note file.md")
+	if err := os.WriteFile(file, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(file, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(vault, "docs", "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{cfg: &config.Config{VaultDir: vault}}
+
+	depthZero := httptest.NewRequest("PROPFIND", "/docs/note%20file.md", nil)
+	depthZero.Header.Set("Depth", "0")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, depthZero)
+	if rec.Code != http.StatusMultiStatus {
+		t.Fatalf("Depth 0 status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := strings.Count(rec.Body.String(), "<D:response>"); got != 1 {
+		t.Fatalf("Depth 0 responses = %d: %s", got, rec.Body.String())
+	}
+	for _, want := range []string{"note%20file.md", "5", stamp.Format(http.TimeFormat)} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("Depth 0 missing %q: %s", want, rec.Body.String())
+		}
+	}
+
+	depthOne := httptest.NewRequest("PROPFIND", "/docs/", nil)
+	depthOne.Header.Set("Depth", "1")
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, depthOne)
+	if rec.Code != http.StatusMultiStatus {
+		t.Fatalf("Depth 1 status = %d: %s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{"<D:href>/docs/</D:href>", "note%20file.md", "<D:href>/docs/child/</D:href>"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("Depth 1 missing %q: %s", want, rec.Body.String())
+		}
+	}
+}
+
+func TestPropfindRejectsMissingAndTraversalTargets(t *testing.T) {
+	vault := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("private"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(vault, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{cfg: &config.Config{VaultDir: vault}}
+	for _, target := range []string{"/missing", "/%2e%2e/secret", "/docs/%2e%2e/%2e%2e/secret", "/escape"} {
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest("PROPFIND", target, nil))
+		if rec.Code == http.StatusMultiStatus {
+			t.Fatalf("%s unexpectedly returned properties: %s", target, rec.Body.String())
+		}
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("PROPFIND", "/", nil)
+	req.Header.Set("Depth", "infinity")
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("infinite Depth status = %d", rec.Code)
+	}
+}
+
 func TestAuthorizeBasicAuth(t *testing.T) {
 	srv := &Server{cfg: &config.Config{WebDAVUser: "user", WebDAVPass: "pass"}}
 	for name, credentials := range map[string][2]string{"valid": {"user", "pass"}, "bad-user": {"wrong", "pass"}, "bad-pass": {"user", "wrong"}} {
