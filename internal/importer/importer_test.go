@@ -290,6 +290,41 @@ func TestImportHashRelocationRejectsDestinationCollision(t *testing.T) {
 	assertPathExists(t, filepath.Join(imp.cfg.VaultDir, "pdfs", "2026-06-04-first.pdf"))
 }
 
+func TestImportFailurePreservesPriorAIMarkers(t *testing.T) {
+	provider := &testAIProvider{result: ai.Result{OCR: "first OCR", Summary: []string{"first summary"}}}
+	imp, _ := newTestImporter(t, provider, true)
+	source := "Syncs/2026-06-04 note.pdf"
+	if _, err := imp.Import(context.Background(), source, strings.NewReader("first bytes"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	provider.err = errors.New("temporary failure")
+	if _, err := imp.Import(context.Background(), source, strings.NewReader("second bytes"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	noteData, err := os.ReadFile(filepath.Join(imp.cfg.VaultDir, "notes", "2026-06-04 note.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(noteData), "first OCR") || !strings.Contains(string(noteData), "first summary") || strings.Contains(string(noteData), "_AI failed:") {
+		t.Fatalf("successful marker content was not preserved:\n%s", noteData)
+	}
+}
+
+func TestImportFailureWritesMarkersWithoutPriorSuccess(t *testing.T) {
+	provider := &testAIProvider{err: errors.New("temporary failure")}
+	imp, _ := newTestImporter(t, provider, true)
+	if _, err := imp.Import(context.Background(), "Syncs/2026-06-04 note.pdf", strings.NewReader("bytes"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	noteData, err := os.ReadFile(filepath.Join(imp.cfg.VaultDir, "notes", "2026-06-04 note.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(noteData), "_AI failed: temporary failure_") != 2 {
+		t.Fatalf("failure markers missing:\n%s", noteData)
+	}
+}
+
 func TestImportAISuccessRecordsLastSuccessAt(t *testing.T) {
 	provider := &testAIProvider{result: ai.Result{OCR: "first ocr", Summary: []string{"first summary"}}}
 	imp, store, _, _ := newDebounceTestImporter(t, provider, time.Minute)
