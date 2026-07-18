@@ -314,3 +314,92 @@ from = "Syncs/"
 		t.Fatalf("expected no error for max_retries = 0 with enabled = false, got: %v", err)
 	}
 }
+
+func TestLoadAppliesMinReprocessIntervalDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	body := `
+vault_dir = "/tmp/vault"
+
+[[route]]
+from = "Syncs/"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Gemini.MinReprocessIntervalDuration != 0 {
+		t.Errorf("MinReprocessIntervalDuration = %v, want 0", cfg.Gemini.MinReprocessIntervalDuration)
+	}
+}
+
+func TestLoadParsesMinReprocessInterval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	body := `
+vault_dir = "/tmp/vault"
+
+[gemini]
+min_reprocess_interval = "15m"
+
+[[route]]
+from = "Syncs/"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Gemini.MinReprocessIntervalDuration != 15*time.Minute {
+		t.Errorf("MinReprocessIntervalDuration = %v, want 15m", cfg.Gemini.MinReprocessIntervalDuration)
+	}
+}
+
+func TestValidateMinReprocessIntervalRejectedWhenUnparseable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	body := `
+vault_dir = "/tmp/vault"
+
+[gemini]
+min_reprocess_interval = "banana"
+
+[[route]]
+from = "Syncs/"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for unparseable min_reprocess_interval, got nil")
+	}
+	if !strings.Contains(err.Error(), "min_reprocess_interval") {
+		t.Errorf("error does not mention min_reprocess_interval: %v", err)
+	}
+}
+
+func TestValidateMinReprocessIntervalRejectedWhenNegative(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	body := `
+vault_dir = "/tmp/vault"
+
+[gemini]
+min_reprocess_interval = "-1s"
+
+[[route]]
+from = "Syncs/"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for negative min_reprocess_interval, got nil")
+	}
+	if !strings.Contains(err.Error(), "non-negative") {
+		t.Errorf("error does not mention non-negative constraint: %v", err)
+	}
+}

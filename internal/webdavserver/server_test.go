@@ -32,7 +32,7 @@ func TestPutImportsFileIntoVault(t *testing.T) {
 		DefaultNoteDir: "notes",
 		Routes:         []config.Route{{From: "Syncs/", Template: "meeting"}},
 	}
-	imp := importer.New(cfg, store, nil)
+	imp := importer.New(cfg, store, nil, 0)
 	srv := &Server{cfg: cfg, imp: imp}
 
 	req := httptest.NewRequest("PUT", "/Syncs/2026-05-06%20Processing%20service%20%5Bfinance%5D.pdf", bytes.NewReader([]byte("pdf-bytes")))
@@ -77,7 +77,7 @@ func TestPutImportsFileWithAIBlocks(t *testing.T) {
 	}
 	imp := importer.New(cfg, store, fakeAIClient{
 		result: ai.Result{OCR: "full transcript", Summary: []string{"alpha", "beta"}},
-	})
+	}, 0)
 	srv := &Server{cfg: cfg, imp: imp}
 
 	req := httptest.NewRequest("PUT", "/Syncs/2026-06-04%20note.pdf", bytes.NewReader([]byte("pdf-bytes")))
@@ -117,7 +117,7 @@ func TestPutSurfacesAIErrorInBothBlocks(t *testing.T) {
 	}
 	imp := importer.New(cfg, store, fakeAIClient{
 		err: errors.New("gemini 401: API key invalid"),
-	})
+	}, 0)
 	srv := &Server{cfg: cfg, imp: imp}
 
 	req := httptest.NewRequest("PUT", "/Syncs/2026-06-04%20bad.pdf", bytes.NewReader([]byte("pdf-bytes")))
@@ -164,7 +164,7 @@ func TestPutWithoutRouteAIDoesNotCallProvider(t *testing.T) {
 		DefaultNoteDir: "notes",
 		Routes:         []config.Route{{From: "Syncs/", Template: "default"}}, // AI defaults to false
 	}
-	imp := importer.New(cfg, store, refuseAIClient{t: t})
+	imp := importer.New(cfg, store, refuseAIClient{t: t}, 0)
 	srv := &Server{cfg: cfg, imp: imp}
 
 	req := httptest.NewRequest("PUT", "/Syncs/2026-06-04%20skip.pdf", bytes.NewReader([]byte("pdf-bytes")))
@@ -203,7 +203,7 @@ func TestPutReUploadReplacesAIBlocks(t *testing.T) {
 	// First upload with one Result.
 	imp1 := importer.New(cfg, store, fakeAIClient{
 		result: ai.Result{OCR: "first ocr", Summary: []string{"first bullet"}},
-	})
+	}, 0)
 	srv := &Server{cfg: cfg, imp: imp1}
 	req := httptest.NewRequest("PUT", "/Syncs/2026-06-04%20idem.pdf", bytes.NewReader([]byte("v1")))
 	srv.ServeHTTP(httptest.NewRecorder(), req)
@@ -211,7 +211,7 @@ func TestPutReUploadReplacesAIBlocks(t *testing.T) {
 	// Second upload with a different Result — should replace marker bodies, not append.
 	imp2 := importer.New(cfg, store, fakeAIClient{
 		result: ai.Result{OCR: "second ocr", Summary: []string{"second bullet"}},
-	})
+	}, 0)
 	srv.imp = imp2
 	req = httptest.NewRequest("PUT", "/Syncs/2026-06-04%20idem.pdf", bytes.NewReader([]byte("v2")))
 	rec := httptest.NewRecorder()
@@ -252,7 +252,7 @@ func TestPutSurfacesEmptyAIResultInBothBlocks(t *testing.T) {
 	}
 	imp := importer.New(cfg, store, fakeAIClient{
 		result: ai.Result{}, // both fields empty, no error
-	})
+	}, 0)
 	srv := &Server{cfg: cfg, imp: imp}
 
 	req := httptest.NewRequest("PUT", "/Syncs/2026-06-04%20empty.pdf", bytes.NewReader([]byte("pdf-bytes")))
@@ -306,7 +306,7 @@ func TestPutDuplicateUploadSkipsAICall(t *testing.T) {
 	imp := importer.New(cfg, store, countingAIClient{
 		result: ai.Result{OCR: "transcript", Summary: []string{"bullet"}},
 		calls:  &calls,
-	})
+	}, 0)
 	srv := &Server{cfg: cfg, imp: imp}
 
 	body := []byte("identical-pdf-bytes")
@@ -340,7 +340,7 @@ func TestPutAISuccessStoresAIStatusSuccess(t *testing.T) {
 	}
 	imp := importer.New(cfg, store, fakeAIClient{
 		result: ai.Result{OCR: "some text", Summary: []string{"bullet one"}},
-	})
+	}, 0)
 	srv := &Server{cfg: cfg, imp: imp}
 
 	req := httptest.NewRequest("PUT", "/Syncs/2026-07-01%20success.pdf", bytes.NewReader([]byte("pdf-content")))
@@ -388,7 +388,7 @@ func TestPutAIFailureStoresAIStatusFailed(t *testing.T) {
 	}
 	imp := importer.New(cfg, store, fakeAIClient{
 		err: errors.New("gemini 503: service unavailable"),
-	})
+	}, 0)
 	srv := &Server{cfg: cfg, imp: imp}
 
 	req := httptest.NewRequest("PUT", "/Syncs/2026-07-01%20failure.pdf", bytes.NewReader([]byte("pdf-content")))

@@ -24,13 +24,14 @@ import (
 )
 
 type Importer struct {
-	cfg   *config.Config
-	store *state.Store
-	ai    ai.Provider
+	cfg                  *config.Config
+	store                *state.Store
+	ai                   ai.Provider
+	minReprocessInterval time.Duration
 }
 
-func New(cfg *config.Config, store *state.Store, aiProvider ai.Provider) *Importer {
-	return &Importer{cfg: cfg, store: store, ai: aiProvider}
+func New(cfg *config.Config, store *state.Store, aiProvider ai.Provider, minReprocessInterval time.Duration) *Importer {
+	return &Importer{cfg: cfg, store: store, ai: aiProvider, minReprocessInterval: minReprocessInterval}
 }
 
 func (i *Importer) Import(ctx context.Context, input string, reader io.Reader, modTime time.Time) (*state.Record, error) {
@@ -65,6 +66,7 @@ func (i *Importer) Import(ctx context.Context, input string, reader io.Reader, m
 	if existing != nil && existing.VaultPDFPath == t.PDFRel && existing.VaultNotePath == t.NoteRel {
 		if existing.SHA256 == sha {
 			if existing.SourcePath == input && existing.ContentHash != "" {
+				slog.Default().Info("dedup_skipped", "source", input, "sha256", sha, "note", t.NoteRel, "pdf", t.PDFRel)
 				return existing, nil
 			}
 			// Backfill legacy records and preserve exact-hash rename handling.
@@ -76,8 +78,48 @@ func (i *Importer) Import(ctx context.Context, input string, reader io.Reader, m
 		if existing.SourcePath == input && existing.ContentHash != "" && existing.ContentHash == contentHash {
 			return i.refreshRecord(existing, input, modTime, sha, contentHash, int64(len(data)))
 		}
+		// SHA and stable content hash both differ, but if AI previously
+		// succeeded recently and debouncing is enabled, this is likely a
+		// BOOX wrapper-only rewrite (same handwriting, new export metadata).
+		// Refresh the PDF and dedup identity but skip AI and leave the
+		// note's marker blocks as-is.
+		if t.AI && existing.AIStatus == state.AIStatusSuccess &&
+			i.minReprocessInterval > 0 &&
+			!existing.AILastSuccessAt.IsZero() &&
+			time.Since(existing.AILastSuccessAt) < i.minReprocessInterval {
+			return i.refreshWrapper(existing, input, modTime, sha, contentHash, t, data)
+		}
 	}
 	return i.persist(ctx, existing, input, modTime, sha, contentHash, t, data)
+}
+
+// refreshWrapper handles a likely BOOX wrapper-only PDF rewrite: full SHA256
+// changed but the same route/output paths and a recent AI success mean we
+// treat the content as unchanged. It refreshes the on-disk PDF to the newly
+// uploaded bytes and advances the dedup identity (SHA/content hash/mod
+// time/size), but does NOT call the AI provider and does NOT touch the
+// note's marker blocks — the prior AI output stands untouched.
+func (i *Importer) refreshWrapper(existing *state.Record, sourcePath string, modTime time.Time, sha, contentHash string, t plan.Result, data []byte) (*state.Record, error) {
+	pdfAbs := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(t.PDFRel))
+	if err := os.MkdirAll(filepath.Dir(pdfAbs), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(pdfAbs, data, 0o644); err != nil {
+		return nil, err
+	}
+	existing.SHA256 = sha
+	existing.ContentHash = contentHash
+	existing.SourceModTime = modTime
+	existing.SourceSize = int64(len(data))
+	existing.ImportedAt = time.Now().UTC()
+	// AIStatus/AIRetryCount/AILastError/AILastRetryAt/AILastSuccessAt intentionally
+	// left untouched — the previous AI result remains valid and current.
+	if err := i.store.Put(existing); err != nil {
+		return nil, err
+	}
+	slog.Default().Info("ai_skipped", "source", sourcePath, "sha256", sha, "reason", "debounced_wrapper_rewrite")
+	logImported(sourcePath, t.NoteRel, t.PDFRel)
+	return existing, nil
 }
 
 func (i *Importer) lookupRecord(sourcePath, sha string) (*state.Record, error) {
@@ -165,6 +207,7 @@ func (i *Importer) persist(ctx context.Context, existing *state.Record, sourcePa
 			rec.AIRetryCount++
 			rec.AILastError = ""
 			rec.AILastRetryAt = time.Now().UTC()
+			rec.AILastSuccessAt = time.Now().UTC()
 		}
 	} else if !t.AI {
 		slog.Default().Debug("ai_skipped", "source", sourcePath, "reason", "route_ai_disabled")
@@ -294,6 +337,7 @@ func (i *Importer) RetryAI(ctx context.Context, rec state.Record) error {
 	rec.AIRetryCount++
 	rec.AILastError = ""
 	rec.AILastRetryAt = time.Now().UTC()
+	rec.AILastSuccessAt = time.Now().UTC()
 	if err := i.store.Put(&rec); err != nil {
 		return fmt.Errorf("retry AI: save record: %w", err)
 	}

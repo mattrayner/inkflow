@@ -73,7 +73,7 @@ internal/state/store.go        BoltDB deduplication records
 
 Data flow: `PUT /path/file.pdf` → route match → raw and stable PDF hash dedup check → template render → optional AI → write PDF + note.
 
-`ai.Provider` interface (`internal/ai/provider.go`) has one implementation: `gemini.Client`.
+`ai.Provider` interface (`internal/ai/provider.go`) has two implementations: `gemini.Client` and `openai.Client`, selected via `[ai].provider` (`"gemini"` default | `"openai"`).
 
 ---
 
@@ -81,9 +81,11 @@ Data flow: `PUT /path/file.pdf` → route match → raw and stable PDF hash dedu
 
 **Deduplication skips AI:** Same SHA256 + same vault paths → import skipped entirely, no AI call. For the same WebDAV source and vault paths, a stable PDF hash also skips re-import when only volatile export metadata (dates or trailer ID) changed. Changing route (different pdf_dir/note_dir) bypasses dedup. Existing state records gain the stable hash on their next upload; a metadata-only change may therefore re-import once during migration.
 
+**Wrapper-rewrite debounce (opt-in):** `[gemini].min_reprocess_interval` (default `"0s"`, disabled) suppresses AI re-processing when the same route/output paths receive a *different* SHA256 within the interval since the last successful AI run — this targets BOOX PDFs whose export metadata changes on every sync even when the handwriting doesn't. On a debounced upload, the vault PDF is refreshed to the new bytes and the dedup record advances, but the note's marker blocks are left untouched (no AI call). A prior AI *failure* is never treated as eligible to debounce.
+
 **Marker blocks replaced, not appended:** On re-upload, `<!-- inkflow:ocr:start -->` and `<!-- inkflow:summary:start -->` blocks are fully replaced. Previous content lost.
 
-**No Gemini retry:** On API failure, error message is written into the marker blocks and import continues. No retry logic exists.
+**AI retry on failure (opt-in):** `[gemini.retry]` (`enabled`, `max_retries`, `backoff`) drives a background scheduler (`internal/retry`) that retries failed AI imports. Disabled by default — on failure, the error message is written into the marker blocks and import continues with no retry unless explicitly enabled.
 
 **Route matching:** Longest prefix wins. Two routes with identical `from` → error at startup, not at request time.
 
@@ -95,9 +97,9 @@ Data flow: `PUT /path/file.pdf` → route match → raw and stable PDF hash dedu
 
 ## Testing
 
-Packages with tests: `cmd/inkflow`, `internal/ai/gemini`, `internal/config`, `internal/frontmatter`, `internal/note`, `internal/plan`, `internal/webdavserver`.
+Packages with tests: `cmd/inkflow`, `internal/ai/gemini`, `internal/config`, `internal/frontmatter`, `internal/note`, `internal/plan`, `internal/webdavserver`, `internal/importer`, `internal/retry`, `internal/state`.
 
-No tests in: `internal/importer`, `internal/log`, `internal/state`, `internal/util`.
+No tests in: `internal/log`, `internal/util`.
 
 Patterns: `t.TempDir()` for file I/O, `t.Setenv()` for env vars, simple mock structs (no framework). See `mockProvider` in `internal/webdavserver/server_test.go` for the AI mock pattern.
 

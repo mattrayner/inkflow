@@ -61,6 +61,9 @@ func applyDefaults(cfg *Config, md toml.MetaData) {
 	if cfg.Gemini.Timeout == "" {
 		cfg.Gemini.Timeout = "60s"
 	}
+	if cfg.Gemini.MinReprocessInterval == "" {
+		cfg.Gemini.MinReprocessInterval = "0s"
+	}
 	if cfg.Gemini.OCRPrompt == "" {
 		cfg.Gemini.OCRPrompt = defaultOCRPrompt
 	}
@@ -108,6 +111,14 @@ func validate(cfg *Config) error {
 		return fmt.Errorf("gemini.retry.backoff must be a positive duration, got %q", cfg.Gemini.Retry.Backoff)
 	}
 	cfg.Gemini.Retry.BackoffDuration = d
+	minReprocessInterval, err := time.ParseDuration(cfg.Gemini.MinReprocessInterval)
+	if err != nil {
+		return fmt.Errorf("gemini.min_reprocess_interval %q: must be a non-negative duration: %w", cfg.Gemini.MinReprocessInterval, err)
+	}
+	if minReprocessInterval < 0 {
+		return fmt.Errorf("gemini.min_reprocess_interval must be a non-negative duration, got %q", cfg.Gemini.MinReprocessInterval)
+	}
+	cfg.Gemini.MinReprocessIntervalDuration = minReprocessInterval
 	if cfg.Gemini.Retry.Enabled && cfg.Gemini.Retry.MaxRetries < 1 {
 		return fmt.Errorf("gemini.retry.max_retries must be >= 1 when retry is enabled, got %d", cfg.Gemini.Retry.MaxRetries)
 	}

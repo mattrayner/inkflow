@@ -40,6 +40,12 @@ type GeminiConfig struct {
 	Timeout       string `toml:"timeout" json:"timeout"`
 	OCRPrompt     string `toml:"ocr_prompt" json:"ocr_prompt"`
 	SummaryPrompt string `toml:"summary_prompt" json:"summary_prompt"`
+	// MinReprocessInterval, when set, suppresses AI re-processing for a
+	// route/output-path match whose full SHA256 changed but whose last AI
+	// run succeeded within this interval. Empty/"0s" disables debouncing
+	// (default: disabled, preserving current behavior exactly).
+	MinReprocessInterval         string        `toml:"min_reprocess_interval" json:"min_reprocess_interval"`
+	MinReprocessIntervalDuration time.Duration `toml:"-" json:"-"`
 
 	Retry RetryConfig `toml:"retry" json:"retry"`
 }
