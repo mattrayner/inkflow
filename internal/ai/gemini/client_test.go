@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"inkflow/internal/ai"
 )
 
 func newTestClient(t *testing.T, handler http.HandlerFunc) (*Client, *httptest.Server) {
@@ -95,6 +98,13 @@ func TestProcessAuthFailure(t *testing.T) {
 	// Should extract just error.message, not the raw JSON body.
 	if err.Error() != "gemini 401: API key invalid" {
 		t.Fatalf("expected clean error message, got: %v", err)
+	}
+	var apiErr *ai.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatal("expected shared ai.APIError")
+	}
+	if apiErr.StatusCode != http.StatusUnauthorized || apiErr.Message != "API key invalid" {
+		t.Errorf("APIError = %#v, want status 401 and message %q", apiErr, "API key invalid")
 	}
 }
 
@@ -213,7 +223,7 @@ func TestProcessUnescapesDoublyEscapedNewlines(t *testing.T) {
 	}
 }
 
-func TestIsRetryable(t *testing.T) {
+func TestAPIErrorRetryability(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
@@ -221,32 +231,37 @@ func TestIsRetryable(t *testing.T) {
 	}{
 		{
 			name: "429 rate limited",
-			err:  &APIError{StatusCode: 429, Message: "rate limited"},
+			err:  &ai.APIError{StatusCode: 429, Message: "rate limited"},
 			want: true,
 		},
 		{
 			name: "500 internal server error",
-			err:  &APIError{StatusCode: 500, Message: "internal server error"},
+			err:  &ai.APIError{StatusCode: 500, Message: "internal server error"},
 			want: true,
 		},
 		{
 			name: "503 service unavailable",
-			err:  &APIError{StatusCode: 503, Message: "service unavailable"},
+			err:  &ai.APIError{StatusCode: 503, Message: "service unavailable"},
 			want: true,
 		},
 		{
 			name: "401 unauthorized",
-			err:  &APIError{StatusCode: 401, Message: "API key invalid"},
+			err:  &ai.APIError{StatusCode: 401, Message: "API key invalid"},
 			want: false,
 		},
 		{
 			name: "403 forbidden",
-			err:  &APIError{StatusCode: 403, Message: "access denied"},
+			err:  &ai.APIError{StatusCode: 403, Message: "access denied"},
 			want: false,
 		},
 		{
 			name: "400 bad request",
-			err:  &APIError{StatusCode: 400, Message: "invalid request"},
+			err:  &ai.APIError{StatusCode: 400, Message: "invalid request"},
+			want: false,
+		},
+		{
+			name: "wrapped client error",
+			err:  fmt.Errorf("process PDF: %w", &ai.APIError{StatusCode: 404, Message: "not found"}),
 			want: false,
 		},
 		{
@@ -267,9 +282,9 @@ func TestIsRetryable(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := IsRetryable(tc.err)
+			got := ai.IsRetryable(tc.err)
 			if got != tc.want {
-				t.Errorf("IsRetryable(%v) = %v, want %v", tc.err, got, tc.want)
+				t.Errorf("ai.IsRetryable(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}

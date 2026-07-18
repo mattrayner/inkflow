@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"inkflow/internal/ai/gemini"
+	"inkflow/internal/ai"
 	"inkflow/internal/config"
 	"inkflow/internal/state"
 )
@@ -115,7 +115,7 @@ func (s *Scheduler) processRecord(ctx context.Context, rec state.Record) {
 
 	// Non-retryable: either HTTP auth/client error, or missing vault PDF.
 	// Both are permanent failures that benefit from no further retries.
-	retryable := !errors.Is(err, os.ErrNotExist) && gemini.IsRetryable(err)
+	retryable := !errors.Is(err, os.ErrNotExist) && ai.IsRetryable(err)
 
 	if !retryable {
 		// Jump straight to MaxRetries so this record is never polled again.

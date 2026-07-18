@@ -2,12 +2,13 @@ package retry
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"inkflow/internal/ai/gemini"
+	"inkflow/internal/ai"
 	"inkflow/internal/config"
 	"inkflow/internal/state"
 )
@@ -163,7 +164,7 @@ func TestRunOnceNonRetryableExhaustsImmediately(t *testing.T) {
 	}
 
 	// 401 is non-retryable.
-	nonRetryableErr := &gemini.APIError{StatusCode: 401, Message: "API key invalid"}
+	nonRetryableErr := fmt.Errorf("retry import: %w", &ai.APIError{StatusCode: 401, Message: "API key invalid"})
 	mock := &mockRetrier{retryResult: nonRetryableErr}
 	cfg := config.RetryConfig{
 		Enabled:         true,
@@ -215,7 +216,7 @@ func TestExhaustedRetryMessageIncludesAttemptCount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	retryableErr := &gemini.APIError{StatusCode: 503, Message: "service unavailable"}
+	retryableErr := &ai.APIError{StatusCode: 503, Message: "service unavailable"}
 	mock := &mockRetrier{retryResult: retryableErr}
 	cfg := config.RetryConfig{
 		Enabled:         true,
@@ -292,7 +293,7 @@ func TestRunOnceRetryableFailureBelowMaxIncrementsOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	retryableErr := &gemini.APIError{StatusCode: 503, Message: "service unavailable"}
+	retryableErr := &ai.APIError{StatusCode: 503, Message: "service unavailable"}
 	mock := &mockRetrier{retryResult: retryableErr}
 	cfg := config.RetryConfig{
 		Enabled:         true,

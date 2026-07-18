@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,39 +14,6 @@ import (
 )
 
 const defaultEndpoint = "https://generativelanguage.googleapis.com"
-
-// APIError is returned by Client.Process for non-2xx HTTP responses from the
-// Gemini API. It carries the raw status code so callers can classify the error
-// (e.g. IsRetryable) without parsing the message string.
-type APIError struct {
-	StatusCode int
-	Message    string
-}
-
-func (e *APIError) Error() string {
-	return fmt.Sprintf("gemini %d: %s", e.StatusCode, e.Message)
-}
-
-// IsRetryable reports whether an error returned by Client.Process is worth
-// retrying. Rules:
-//   - 429 (rate limited) or any 5xx (server error) → retryable
-//   - 400, 401, 403, 404 → non-retryable (permanent client/auth error)
-//   - nil → false (not an error)
-//   - anything else (network, timeout, unknown) → retryable (fail-open)
-func IsRetryable(err error) bool {
-	if err == nil {
-		return false
-	}
-	var apiErr *APIError
-	if errors.As(err, &apiErr) {
-		switch apiErr.StatusCode {
-		case 400, 401, 403, 404:
-			return false
-		}
-		return true // 429, 500, 502, 503, 504, other HTTP
-	}
-	return true // network / timeout / unknown — assume transient
-}
 
 // Compile-time interface compliance check.
 var _ ai.Provider = (*Client)(nil)
@@ -106,10 +72,10 @@ func (c *Client) Process(ctx context.Context, pdf io.Reader) (ai.Result, error) 
 		return ai.Result{}, fmt.Errorf("read response body: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return ai.Result{}, &APIError{
+		return ai.Result{}, fmt.Errorf("gemini %w", &ai.APIError{
 			StatusCode: resp.StatusCode,
 			Message:    extractErrorMessage(respBody),
-		}
+		})
 	}
 
 	return parseResponse(respBody)
