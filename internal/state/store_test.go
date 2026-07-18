@@ -111,6 +111,16 @@ func TestGetFailedAIImports_OldZeroValueRecordsNotReturned(t *testing.T) {
 	}
 }
 
+func TestLegacyRecordDefaultsToSucceeded(t *testing.T) {
+	var got Record
+	if err := json.Unmarshal([]byte(`{"source_path":"/sync/legacy.pdf","sha256":"legacy001"}`), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.AIStatus != AIStatusSuccess {
+		t.Fatalf("legacy status = %+v, want succeeded", got)
+	}
+}
+
 func TestGetFailedAIImports_ReturnsMultipleFailed(t *testing.T) {
 	s := openTestStore(t)
 
