@@ -445,3 +445,46 @@ from = "/a/b/"
 		t.Fatalf("nested routes should be valid: %v", err)
 	}
 }
+
+func TestLoadAppliesServerDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	if err := os.WriteFile(path, []byte("vault_dir = \"/tmp/vault\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReadHeaderTimeoutDuration != 5*time.Second || cfg.ReadTimeoutDuration != 2*time.Minute || cfg.WriteTimeoutDuration != 2*time.Minute || cfg.IdleTimeoutDuration != time.Minute || cfg.MaxUploadBytes != 100*1024*1024 {
+		t.Errorf("unexpected server defaults: %+v", cfg)
+	}
+}
+
+func TestLoadParsesServerOverrides(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	body := "vault_dir = \"/tmp/vault\"\nread_header_timeout = \"1s\"\nread_timeout = \"3s\"\nwrite_timeout = \"4s\"\nidle_timeout = \"5s\"\nmax_upload_bytes = 42\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReadHeaderTimeoutDuration != time.Second || cfg.ReadTimeoutDuration != 3*time.Second || cfg.WriteTimeoutDuration != 4*time.Second || cfg.IdleTimeoutDuration != 5*time.Second || cfg.MaxUploadBytes != 42 {
+		t.Errorf("unexpected server overrides: %+v", cfg)
+	}
+}
+
+func TestLoadRejectsInvalidServerLimits(t *testing.T) {
+	for name, setting := range map[string]string{"duration": "read_timeout = \"0s\"", "bytes": "max_upload_bytes = 0"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "inkflow.toml")
+			if err := os.WriteFile(path, []byte("vault_dir = \"/tmp/vault\"\n"+setting+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := Load(path); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}

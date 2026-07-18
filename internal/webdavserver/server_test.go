@@ -5,17 +5,122 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"inkflow/internal/ai"
 	"inkflow/internal/config"
 	"inkflow/internal/importer"
 	"inkflow/internal/state"
 )
+
+func TestHTTPServerUsesConfiguredTimeouts(t *testing.T) {
+	cfg := &config.Config{ListenAddr: "127.0.0.1:8080", ReadHeaderTimeoutDuration: time.Second, ReadTimeoutDuration: 2 * time.Second, WriteTimeoutDuration: 3 * time.Second, IdleTimeoutDuration: 4 * time.Second}
+	httpSrv := newHTTPServer(cfg, http.NotFoundHandler())
+	if httpSrv.ReadHeaderTimeout != time.Second || httpSrv.ReadTimeout != 2*time.Second || httpSrv.WriteTimeout != 3*time.Second || httpSrv.IdleTimeout != 4*time.Second {
+		t.Errorf("unexpected timeouts: %+v", httpSrv)
+	}
+}
+
+func TestAuthorizeBasicAuth(t *testing.T) {
+	srv := &Server{cfg: &config.Config{WebDAVUser: "user", WebDAVPass: "pass"}}
+	for name, credentials := range map[string][2]string{"valid": {"user", "pass"}, "bad-user": {"wrong", "pass"}, "bad-pass": {"user", "wrong"}} {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodOptions, "/", nil)
+			req.SetBasicAuth(credentials[0], credentials[1])
+			rec := httptest.NewRecorder()
+			allowed := srv.authorize(rec, req)
+			if name == "valid" && !allowed {
+				t.Fatal("valid credentials rejected")
+			}
+			if name != "valid" {
+				if allowed || rec.Code != http.StatusUnauthorized || rec.Header().Get("WWW-Authenticate") == "" {
+					t.Fatalf("invalid credentials allowed or not challenged: code=%d", rec.Code)
+				}
+			}
+		})
+	}
+}
+
+func TestLoopbackListenAddressDetection(t *testing.T) {
+	for addr, want := range map[string]bool{"127.0.0.1:8080": true, "[::1]:8080": true, "localhost:8080": true, "0.0.0.0:8080": false, ":8080": false, "bad": false} {
+		if got := isLoopbackListenAddr(addr); got != want {
+			t.Errorf("isLoopbackListenAddr(%q) = %t, want %t", addr, got, want)
+		}
+	}
+}
+
+func TestUnauthenticatedNonLoopbackBindWarns(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	srv := &Server{logger: logger}
+	if !isLoopbackListenAddr("0.0.0.0:8080") {
+		srv.warn("UNSAFE WEBDAV CONFIGURATION: unauthenticated plaintext vault writes are reachable on a non-loopback address")
+	}
+	if !strings.Contains(logs.String(), "UNSAFE WEBDAV CONFIGURATION") {
+		t.Fatalf("missing non-loopback warning: %s", logs.String())
+	}
+	logs.Reset()
+	if !isLoopbackListenAddr("127.0.0.1:8080") {
+		srv.warn("unexpected warning")
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("loopback emitted warning: %s", logs.String())
+	}
+}
+
+func TestShutdownUsesBoundedContext(t *testing.T) {
+	httpSrv := &http.Server{}
+	var logs bytes.Buffer
+	srv := &Server{logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	done := make(chan struct{})
+	go func() {
+		srv.shutdown(httpSrv)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("bounded shutdown did not return promptly for an idle server")
+	}
+}
+
+func TestPutRejectsOversizeUpload(t *testing.T) {
+	vaultDir := t.TempDir()
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.Config{VaultDir: vaultDir, DefaultPDFDir: "pdfs", DefaultNoteDir: "notes", MaxUploadBytes: 3, Routes: []config.Route{{From: "Syncs/"}}}
+	srv := &Server{cfg: cfg, imp: importer.New(cfg, store, nil, 0), logger: slog.Default()}
+	req := httptest.NewRequest(http.MethodPut, "/Syncs/oversize.pdf", bytes.NewBufferString("abcd"))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize status = %d: %s", rec.Code, rec.Body.String())
+	}
+	record, err := store.GetBySourcePath("Syncs/oversize.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record != nil {
+		t.Fatal("oversize upload persisted a state record")
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/Syncs/limit.pdf", bytes.NewBufferString("abc"))
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("boundary status = %d: %s", rec.Code, rec.Body.String())
+	}
+}
 
 func TestPutImportsFileIntoVault(t *testing.T) {
 	vaultDir := t.TempDir()

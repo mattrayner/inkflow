@@ -46,6 +46,21 @@ func applyDefaults(cfg *Config, md toml.MetaData) {
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = "127.0.0.1:8080"
 	}
+	if cfg.ReadHeaderTimeout == "" {
+		cfg.ReadHeaderTimeout = "5s"
+	}
+	if cfg.ReadTimeout == "" {
+		cfg.ReadTimeout = "2m"
+	}
+	if cfg.WriteTimeout == "" {
+		cfg.WriteTimeout = "2m"
+	}
+	if cfg.IdleTimeout == "" {
+		cfg.IdleTimeout = "1m"
+	}
+	if !md.IsDefined("max_upload_bytes") {
+		cfg.MaxUploadBytes = 100 * 1024 * 1024
+	}
 	if cfg.DefaultPDFDir == "" {
 		cfg.DefaultPDFDir = "Attachments/Boox"
 	}
@@ -130,6 +145,28 @@ func validate(cfg *Config) error {
 	}
 	if cfg.AI.Provider != "gemini" && cfg.AI.Provider != "openai" {
 		return fmt.Errorf("ai.provider must be \"gemini\" or \"openai\", got %q", cfg.AI.Provider)
+	}
+	for _, timeout := range []struct {
+		name  string
+		value string
+		out   *time.Duration
+	}{
+		{"read_header_timeout", cfg.ReadHeaderTimeout, &cfg.ReadHeaderTimeoutDuration},
+		{"read_timeout", cfg.ReadTimeout, &cfg.ReadTimeoutDuration},
+		{"write_timeout", cfg.WriteTimeout, &cfg.WriteTimeoutDuration},
+		{"idle_timeout", cfg.IdleTimeout, &cfg.IdleTimeoutDuration},
+	} {
+		duration, err := time.ParseDuration(timeout.value)
+		if err != nil {
+			return fmt.Errorf("%s %q: %w", timeout.name, timeout.value, err)
+		}
+		if duration <= 0 {
+			return fmt.Errorf("%s must be a positive duration, got %q", timeout.name, timeout.value)
+		}
+		*timeout.out = duration
+	}
+	if cfg.MaxUploadBytes <= 0 {
+		return fmt.Errorf("max_upload_bytes must be positive, got %d", cfg.MaxUploadBytes)
 	}
 	return nil
 }
