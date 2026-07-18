@@ -26,10 +26,19 @@ type Config struct {
 	DefaultNoteDir string `toml:"default_note_dir" json:"default_note_dir"`
 	StateFile      string `toml:"state_file" json:"state_file"`
 
-	AI     AIConfig     `toml:"ai" json:"ai"`
-	Gemini GeminiConfig `toml:"gemini" json:"gemini"`
-	OpenAI OpenAIConfig `toml:"openai" json:"openai"`
-	Routes []Route      `toml:"route" json:"route"`
+	AI            AIConfig            `toml:"ai" json:"ai"`
+	Gemini        GeminiConfig        `toml:"gemini" json:"gemini"`
+	OpenAI        OpenAIConfig        `toml:"openai" json:"openai"`
+	Observability ObservabilityConfig `toml:"observability" json:"observability"`
+	Routes        []Route             `toml:"route" json:"route"`
+}
+
+// ObservabilityConfig controls optional Prometheus metrics exposure.
+// A dedicated metrics listener is intentionally unauthenticated; bind it to a
+// private address or protect it at the network layer.
+type ObservabilityConfig struct {
+	MetricsEnabled bool   `toml:"metrics_enabled" json:"metrics_enabled"`
+	MetricsAddr    string `toml:"metrics_addr" json:"metrics_addr"`
 }
 
 // NormalizeRoutePrefix returns the canonical form used for route matching.

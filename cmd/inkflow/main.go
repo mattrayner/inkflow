@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"inkflow/internal/config"
 	"inkflow/internal/importer"
 	"inkflow/internal/log"
+	"inkflow/internal/observability"
 	"inkflow/internal/plan"
 	"inkflow/internal/retry"
 	"inkflow/internal/state"
@@ -35,6 +38,7 @@ type runtime struct {
 	store     *state.Store
 	imp       *importer.Importer
 	scheduler *retry.Scheduler
+	metrics   *observability.Metrics
 }
 
 var rt runtime
@@ -212,6 +216,13 @@ func loadRuntime(logger *slog.Logger, configPath string) (runtime, error) {
 	if err != nil {
 		return runtime{}, err
 	}
+	var metrics *observability.Metrics
+	if cfg.Observability.MetricsEnabled {
+		metrics = observability.New()
+		if aiProvider != nil {
+			aiProvider = observability.WrapProvider(cfg.AI.Provider, aiProvider, metrics)
+		}
+	}
 	locks := importer.NewLockManager()
 	imp := importer.New(cfg, store, aiProvider, cfg.Gemini.MinReprocessIntervalDuration, locks)
 
@@ -222,7 +233,7 @@ func loadRuntime(logger *slog.Logger, configPath string) (runtime, error) {
 		sched = retry.NewScheduler(store, imp, cfg.Gemini.Retry, locks)
 	}
 
-	return runtime{logger: logger, cfg: cfg, store: store, imp: imp, scheduler: sched}, nil
+	return runtime{logger: logger, cfg: cfg, store: store, imp: imp, scheduler: sched, metrics: metrics}, nil
 }
 
 func defaultStatePath() string {
@@ -275,10 +286,20 @@ func newServeCmd() *cobra.Command {
 		Short: "Serve BOOX uploads over WebDAV",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var metricsSrv *http.Server
+			if rt.metrics != nil && rt.cfg.Observability.MetricsAddr != "" {
+				listener, err := net.Listen("tcp", rt.cfg.Observability.MetricsAddr)
+				if err != nil {
+					return fmt.Errorf("listen for metrics: %w", err)
+				}
+				metricsSrv = &http.Server{Handler: rt.metrics.Handler()}
+				go func() { _ = metricsSrv.Serve(listener) }()
+				defer metricsSrv.Shutdown(context.Background())
+			}
 			if rt.scheduler != nil {
 				rt.scheduler.Start(cmd.Context())
 			}
-			err := webdavserver.Serve(cmd.Context(), rt.cfg, rt.imp, rt.logger)
+			err := webdavserver.Serve(cmd.Context(), rt.cfg, rt.imp, rt.store, rt.metrics, rt.logger)
 			if rt.scheduler != nil {
 				rt.scheduler.Stop()
 			}
