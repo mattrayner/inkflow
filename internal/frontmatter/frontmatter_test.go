@@ -42,3 +42,10 @@ func TestUpdateTagsReplaceStrategy(t *testing.T) {
 		t.Fatalf("replace tags = %q", got)
 	}
 }
+
+func TestUpdateTagsReplaceStrategyRemovesTagsWhenFilenameHasNone(t *testing.T) {
+	got := UpdateTagsWithStrategy("---\ntags:\n  - manual\n---\nBody\n", nil, "replace")
+	if strings.Contains(got, "manual") || !strings.Contains(got, "tags: []") {
+		t.Fatalf("replace without filename tags = %q", got)
+	}
+}

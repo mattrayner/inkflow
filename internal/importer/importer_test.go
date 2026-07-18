@@ -304,6 +304,54 @@ func TestImportHashRelocationRejectsDestinationCollision(t *testing.T) {
 	assertPathExists(t, filepath.Join(imp.cfg.VaultDir, "pdfs", "2026-06-04-first.pdf"))
 }
 
+func TestImportFailedAIReimportPreservesSuccessfulMarkersByDefault(t *testing.T) {
+	provider := &testAIProvider{result: ai.Result{OCR: "successful ocr", Summary: []string{"successful summary"}}}
+	imp, _ := newTestImporter(t, provider, true)
+	importTestPDF(t, imp, "first-pdf")
+	provider.err = errors.New("temporary failure")
+	importTestPDF(t, imp, "second-pdf")
+
+	content, err := os.ReadFile(filepath.Join(imp.cfg.VaultDir, "notes", "2026-06-04 note.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "successful ocr") || !strings.Contains(string(content), "successful summary") || strings.Contains(string(content), "_AI failed:") {
+		t.Fatalf("successful markers were not preserved:\n%s", content)
+	}
+}
+
+func TestImportFailedAIReimportCanReplaceMarkersWithRoutePolicy(t *testing.T) {
+	provider := &testAIProvider{result: ai.Result{OCR: "successful ocr", Summary: []string{"successful summary"}}}
+	imp, _ := newTestImporter(t, provider, true)
+	falseValue := false
+	imp.cfg.Routes[0].PreserveMarkerOnAIFailure = &falseValue
+	importTestPDF(t, imp, "first-pdf")
+	provider.err = errors.New("temporary failure")
+	importTestPDF(t, imp, "second-pdf")
+
+	content, err := os.ReadFile(filepath.Join(imp.cfg.VaultDir, "notes", "2026-06-04 note.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), "successful ocr") || strings.Contains(string(content), "successful summary") || strings.Count(string(content), "_AI failed: temporary failure_") != 2 {
+		t.Fatalf("failure markers were not replaced:\n%s", content)
+	}
+}
+
+func TestImportFailedAIWritesMarkersWhenNoPriorContentExists(t *testing.T) {
+	provider := &testAIProvider{err: errors.New("temporary failure")}
+	imp, _ := newTestImporter(t, provider, true)
+	importTestPDF(t, imp, "first-pdf")
+
+	content, err := os.ReadFile(filepath.Join(imp.cfg.VaultDir, "notes", "2026-06-04 note.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(content), "_AI failed: temporary failure_") != 2 {
+		t.Fatalf("failure markers missing:\n%s", content)
+	}
+}
+
 func TestImportFailurePreservesPriorAIMarkers(t *testing.T) {
 	provider := &testAIProvider{result: ai.Result{OCR: "first OCR", Summary: []string{"first summary"}}}
 	imp, _ := newTestImporter(t, provider, true)

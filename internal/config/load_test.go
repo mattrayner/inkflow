@@ -165,6 +165,44 @@ from = "Syncs/"
 	}
 }
 
+func TestLoadRouteNoteUpdatePolicyDefaultsAndOverrides(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	body := `
+vault_dir = "/tmp/vault"
+
+[[route]]
+from = "Default/"
+
+[[route]]
+from = "Legacy/"
+tag_merge_strategy = "replace"
+preserve_marker_on_ai_failure = false
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Routes[0].TagMergeStrategy != "merge" || cfg.Routes[0].PreserveMarkerOnAIFailure != nil {
+		t.Fatalf("default route policy = %+v", cfg.Routes[0])
+	}
+	if cfg.Routes[1].TagMergeStrategy != "replace" || cfg.Routes[1].PreserveMarkerOnAIFailure == nil || *cfg.Routes[1].PreserveMarkerOnAIFailure {
+		t.Fatalf("explicit route policy = %+v", cfg.Routes[1])
+	}
+}
+
+func TestLoadRejectsInvalidTagMergeStrategy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	if err := os.WriteFile(path, []byte("vault_dir = \"/tmp/vault\"\n[[route]]\nfrom = \"Syncs/\"\ntag_merge_strategy = \"invalid\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Load(path); err == nil || !strings.Contains(err.Error(), "tag_merge_strategy") {
+		t.Fatalf("error = %v, want invalid strategy error", err)
+	}
+}
+
 func TestLoadParsesRetryConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "inkflow.toml")
 	body := `

@@ -380,7 +380,7 @@ func (i *Importer) writeNote(t plan.Result, summaryBody, ocrBody string) error {
 	}
 	var content string
 	if existing, err := os.ReadFile(noteAbs); err == nil {
-		content = frontmatter.UpdateTags(string(existing), t.Tags)
+		content = frontmatter.UpdateTagsWithStrategy(string(existing), t.Tags, t.TagMergeStrategy)
 	} else if !os.IsNotExist(err) {
 		return err
 	} else {
@@ -396,7 +396,7 @@ func (i *Importer) writeNote(t plan.Result, summaryBody, ocrBody string) error {
 		}
 		content = body
 	}
-	preserveFailure := strings.HasPrefix(summaryBody, "_AI failed:")
+	preserveFailure := t.PreserveMarkerOnAIFailure && strings.HasPrefix(summaryBody, "_AI failed:")
 	content = note.UpsertMarkerBlockWithFailurePolicy(content, "Summary", "summary", summaryBody, preserveFailure)
 	content = note.UpsertMarkerBlockWithFailurePolicy(content, "OCR", "ocr", ocrBody, preserveFailure)
 	return os.WriteFile(noteAbs, []byte(content), 0o644)
@@ -482,7 +482,11 @@ func (i *Importer) WriteNoteError(rec state.Record, msg string) error {
 	if err != nil {
 		return fmt.Errorf("write note error: read %s: %w", noteAbs, err)
 	}
-	content := note.UpsertMarkerBlockWithFailurePolicy(string(existing), "Summary", "summary", msg, true)
-	content = note.UpsertMarkerBlockWithFailurePolicy(content, "OCR", "ocr", msg, true)
+	preserveFailure := true
+	if t, err := plan.Build(i.cfg.Routes, i.cfg, rec.SourcePath, rec.SourceModTime); err == nil {
+		preserveFailure = t.PreserveMarkerOnAIFailure
+	}
+	content := note.UpsertMarkerBlockWithFailurePolicy(string(existing), "Summary", "summary", msg, preserveFailure)
+	content = note.UpsertMarkerBlockWithFailurePolicy(content, "OCR", "ocr", msg, preserveFailure)
 	return os.WriteFile(noteAbs, []byte(content), 0o644)
 }

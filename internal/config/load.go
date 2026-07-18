@@ -82,6 +82,11 @@ func applyDefaults(cfg *Config, md toml.MetaData) {
 	if cfg.OpenAI.SummaryPrompt == "" {
 		cfg.OpenAI.SummaryPrompt = defaultSummaryPrompt
 	}
+	for index := range cfg.Routes {
+		if cfg.Routes[index].TagMergeStrategy == "" {
+			cfg.Routes[index].TagMergeStrategy = "merge"
+		}
+	}
 	// Retry defaults: only apply MaxRetries when the key was not explicitly
 	// set in the TOML source, so that max_retries = 0 is preserved for
 	// validation (e.g. rejected when enabled = true).
@@ -101,6 +106,9 @@ func validate(cfg *Config) error {
 	for _, r := range cfg.Routes {
 		if r.From == "" {
 			return fmt.Errorf("route.from is required")
+		}
+		if r.TagMergeStrategy != "merge" && r.TagMergeStrategy != "replace" {
+			return fmt.Errorf("route.tag_merge_strategy must be \"merge\" or \"replace\", got %q", r.TagMergeStrategy)
 		}
 	}
 	d, err := time.ParseDuration(cfg.Gemini.Retry.Backoff)
