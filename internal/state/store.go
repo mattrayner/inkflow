@@ -12,7 +12,8 @@ import (
 )
 
 const (
-	AIStatusSuccess = "success"
+	AIStatusPending = "pending"
+	AIStatusSuccess = "succeeded"
 	AIStatusFailed  = "failed"
 )
 
@@ -34,9 +35,9 @@ type Record struct {
 	VaultNotePath string    `json:"vault_note_path"`
 	ImportedAt    time.Time `json:"imported_at"`
 
-	// AI processing state. Empty AIStatus means AI was not configured for this
-	// import. Existing records without these fields deserialise to zero values.
-	AIStatus      string    `json:"ai_status"`
+	// AIStatus is persisted as status. Records written before the asynchronous
+	// queue used ai_status (or no status at all); UnmarshalJSON handles both.
+	AIStatus      string    `json:"status"`
 	AIRetryCount  int       `json:"ai_retry_count"`
 	AILastError   string    `json:"ai_last_error"`
 	AILastRetryAt time.Time `json:"ai_last_retry_at"`
@@ -45,6 +46,33 @@ type Record struct {
 	// on BOOX wrapper-only PDF rewrites. Zero value for legacy records or
 	// records that never had a successful AI run.
 	AILastSuccessAt time.Time `json:"ai_last_success_at"`
+}
+
+// UnmarshalJSON accepts the former ai_status field and treats records without
+// either status as completed. This keeps pre-queue databases from being
+// accidentally enqueued after upgrade.
+func (r *Record) UnmarshalJSON(data []byte) error {
+	type recordAlias Record
+	var raw struct {
+		recordAlias
+		LegacyAIStatus string `json:"ai_status"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*r = Record(raw.recordAlias)
+	if r.AIStatus == "" {
+		if raw.LegacyAIStatus != "" {
+			r.AIStatus = raw.LegacyAIStatus
+		} else {
+			r.AIStatus = AIStatusSuccess
+		}
+	}
+	// The original synchronous implementation used "success".
+	if r.AIStatus == "success" {
+		r.AIStatus = AIStatusSuccess
+	}
+	return nil
 }
 
 func Open(path string) (*Store, error) {
@@ -143,6 +171,28 @@ func (s *Store) GetFailedAIImports() ([]Record, error) {
 				return err
 			}
 			if r.AIStatus == AIStatusFailed {
+				out = append(out, r)
+			}
+			return nil
+		})
+	})
+	if out == nil {
+		out = []Record{}
+	}
+	return out, err
+}
+
+// GetPendingAndFailedAIImports returns work owned by the background worker.
+// Legacy records decode as succeeded and therefore are never selected.
+func (s *Store) GetPendingAndFailedAIImports() ([]Record, error) {
+	var out []Record
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(recordsBucket).ForEach(func(_, v []byte) error {
+			var r Record
+			if err := json.Unmarshal(v, &r); err != nil {
+				return err
+			}
+			if r.AIStatus == AIStatusPending || r.AIStatus == AIStatusFailed {
 				out = append(out, r)
 			}
 			return nil
