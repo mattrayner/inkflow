@@ -227,6 +227,69 @@ func assertPathMissing(t *testing.T, path string) {
 	}
 }
 
+func TestImportRelocatesHashMatchedRenameWithoutAI(t *testing.T) {
+	provider := &testAIProvider{result: ai.Result{OCR: "first ocr"}}
+	imp, _ := newTestImporter(t, provider, true)
+	firstSource := "Syncs/2026-06-04 first.pdf"
+	secondSource := "Syncs/2026-06-04 renamed.pdf"
+	data := "same pdf bytes"
+	if _, err := imp.Import(context.Background(), firstSource, strings.NewReader(data), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	oldPDF := filepath.Join(imp.cfg.VaultDir, "pdfs", "2026-06-04-first.pdf")
+	oldNote := filepath.Join(imp.cfg.VaultDir, "notes", "2026-06-04 first.md")
+	manual := []byte("manual user content\n")
+	if err := os.WriteFile(oldNote, manual, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := imp.Import(context.Background(), secondSource, strings.NewReader(data), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPDF := filepath.Join(imp.cfg.VaultDir, "pdfs", "2026-06-04-renamed.pdf")
+	newNote := filepath.Join(imp.cfg.VaultDir, "notes", "2026-06-04 renamed.md")
+	assertPathMissing(t, oldPDF)
+	assertPathMissing(t, oldNote)
+	assertPathExists(t, newPDF)
+	note, err := os.ReadFile(newNote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(note, manual) {
+		t.Fatalf("relocated note = %q, want %q", note, manual)
+	}
+	if provider.calls != 1 {
+		t.Fatalf("AI calls = %d, want 1", provider.calls)
+	}
+	if rec.SourcePath != secondSource || rec.VaultPDFPath != "pdfs/2026-06-04-renamed.pdf" || rec.VaultNotePath != "notes/2026-06-04 renamed.md" {
+		t.Fatalf("relocated record = %+v", rec)
+	}
+}
+
+func TestImportHashRelocationRejectsDestinationCollision(t *testing.T) {
+	imp, _ := newTestImporter(t, nil, false)
+	firstSource := "Syncs/2026-06-04 first.pdf"
+	if _, err := imp.Import(context.Background(), firstSource, strings.NewReader("same pdf bytes"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	collision := filepath.Join(imp.cfg.VaultDir, "pdfs", "2026-06-04-renamed.pdf")
+	if err := os.WriteFile(collision, []byte("unrelated"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := imp.Import(context.Background(), "Syncs/2026-06-04 renamed.pdf", strings.NewReader("same pdf bytes"), time.Now()); err == nil {
+		t.Fatal("relocation succeeded despite collision")
+	}
+	contents, err := os.ReadFile(collision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "unrelated" {
+		t.Fatalf("collision file changed to %q", contents)
+	}
+	assertPathExists(t, filepath.Join(imp.cfg.VaultDir, "pdfs", "2026-06-04-first.pdf"))
+}
+
 func TestImportAISuccessRecordsLastSuccessAt(t *testing.T) {
 	provider := &testAIProvider{result: ai.Result{OCR: "first ocr", Summary: []string{"first summary"}}}
 	imp, store, _, _ := newDebounceTestImporter(t, provider, time.Minute)
@@ -335,5 +398,66 @@ func TestImportDoesNotDebounceRouteOutputPathChange(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cfg.VaultDir, "moved-notes", "2026-06-04 note.md")); err != nil {
 		t.Fatalf("moved note missing: %v", err)
+	}
+}
+
+func TestImportSamePathNoteWriteFailurePreservesOutputs(t *testing.T) {
+	imp, _, cfg, _ := newDebounceTestImporter(t, nil, 0)
+	importDebouncePDF(t, imp, "first-pdf")
+	pdfPath := filepath.Join(cfg.VaultDir, "pdfs", "2026-06-04-note.pdf")
+	notePath := filepath.Join(cfg.VaultDir, "notes", "2026-06-04 note.md")
+	imp.writeNoteFn = func(plan.Result, string, string) error { return errors.New("note write failed") }
+
+	if _, err := imp.Import(context.Background(), "Syncs/2026-06-04 note.pdf", strings.NewReader("second-pdf"), time.Now().UTC()); err == nil {
+		t.Fatal("Import succeeded, want note write failure")
+	}
+	for _, output := range []string{pdfPath, notePath} {
+		if _, err := os.Stat(output); err != nil {
+			t.Errorf("output %s missing after failed import: %v", output, err)
+		}
+	}
+}
+
+func TestImportSamePathRecordSaveFailurePreservesOutputs(t *testing.T) {
+	imp, _, cfg, _ := newDebounceTestImporter(t, nil, 0)
+	importDebouncePDF(t, imp, "first-pdf")
+	pdfPath := filepath.Join(cfg.VaultDir, "pdfs", "2026-06-04-note.pdf")
+	notePath := filepath.Join(cfg.VaultDir, "notes", "2026-06-04 note.md")
+	imp.saveRecordFn = func(string, *state.Record) error { return errors.New("record save failed") }
+
+	if _, err := imp.Import(context.Background(), "Syncs/2026-06-04 note.pdf", strings.NewReader("second-pdf"), time.Now().UTC()); err == nil {
+		t.Fatal("Import succeeded, want record save failure")
+	}
+	for _, output := range []string{pdfPath, notePath} {
+		if _, err := os.Stat(output); err != nil {
+			t.Errorf("output %s missing after failed import: %v", output, err)
+		}
+	}
+}
+
+func TestImportMovedRecordSaveFailureRemovesNewOutputs(t *testing.T) {
+	imp, _, cfg, _ := newDebounceTestImporter(t, nil, 0)
+	importDebouncePDF(t, imp, "first-pdf")
+	oldPDF := filepath.Join(cfg.VaultDir, "pdfs", "2026-06-04-note.pdf")
+	oldNote := filepath.Join(cfg.VaultDir, "notes", "2026-06-04 note.md")
+	cfg.DefaultPDFDir = "moved-pdfs"
+	cfg.DefaultNoteDir = "moved-notes"
+	imp.saveRecordFn = func(string, *state.Record) error { return errors.New("record save failed") }
+
+	if _, err := imp.Import(context.Background(), "Syncs/2026-06-04 note.pdf", strings.NewReader("second-pdf"), time.Now().UTC()); err == nil {
+		t.Fatal("Import succeeded, want record save failure")
+	}
+	for _, output := range []string{oldPDF, oldNote} {
+		if _, err := os.Stat(output); err != nil {
+			t.Errorf("old output %s missing after failed move: %v", output, err)
+		}
+	}
+	for _, output := range []string{
+		filepath.Join(cfg.VaultDir, "moved-pdfs", "2026-06-04-note.pdf"),
+		filepath.Join(cfg.VaultDir, "moved-notes", "2026-06-04 note.md"),
+	} {
+		if _, err := os.Stat(output); !os.IsNotExist(err) {
+			t.Errorf("new output %s exists after failed move (err = %v)", output, err)
+		}
 	}
 }
