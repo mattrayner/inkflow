@@ -132,7 +132,7 @@ func loadRuntime(logger *slog.Logger, configPath string) (runtime, error) {
 	if err != nil {
 		return runtime{}, err
 	}
-	imp := importer.New(cfg, store, aiProvider)
+	imp := importer.New(cfg, store, aiProvider, cfg.Gemini.MinReprocessIntervalDuration)
 
 	var sched *retry.Scheduler
 	if cfg.Gemini.Retry.Enabled {

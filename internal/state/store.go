@@ -40,6 +40,11 @@ type Record struct {
 	AIRetryCount  int       `json:"ai_retry_count"`
 	AILastError   string    `json:"ai_last_error"`
 	AILastRetryAt time.Time `json:"ai_last_retry_at"`
+	// AILastSuccessAt records when AI last completed successfully for this
+	// record. Used by the reprocess-debounce feature to avoid re-running AI
+	// on BOOX wrapper-only PDF rewrites. Zero value for legacy records or
+	// records that never had a successful AI run.
+	AILastSuccessAt time.Time `json:"ai_last_success_at"`
 }
 
 func Open(path string) (*Store, error) {
