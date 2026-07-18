@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -82,7 +83,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("DAV", "1,2")
 		w.WriteHeader(http.StatusNoContent)
 	case "PROPFIND":
-		s.handlePropfind(w, r, clean)
+		s.handlePropfind(w, r)
 	case http.MethodPut:
 		s.handlePut(w, r, clean)
 	default:
@@ -179,30 +180,119 @@ func (s *Server) routeLabel(clean string) string {
 	return best
 }
 
-func (s *Server) handlePropfind(w http.ResponseWriter, r *http.Request, clean string) {
-	responses := []propResponse{s.responseFor(clean)}
+func (s *Server) handlePropfind(w http.ResponseWriter, r *http.Request) {
+	clean, target, info, err := s.resolveVaultPath(r.URL.EscapedPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+
+	depth := r.Header.Get("Depth")
+	if depth != "" && depth != "0" && depth != "1" {
+		http.Error(w, "unsupported Depth", http.StatusBadRequest)
+		return
+	}
+	responses := []propResponse{s.responseFor(clean, info)}
+	if depth == "1" && info.IsDir() {
+		entries, err := os.ReadDir(target)
+		if err != nil {
+			http.Error(w, "unable to list resource", http.StatusInternalServerError)
+			return
+		}
+		for _, entry := range entries {
+			childClean := path.Join(clean, entry.Name())
+			_, _, childInfo, err := s.resolveVaultPath("/" + childClean)
+			if err != nil {
+				// Do not follow a symlink (including one that escapes the vault).
+				continue
+			}
+			responses = append(responses, s.responseFor(childClean, childInfo))
+		}
+	}
 	w.Header().Set("Content-Type", `application/xml; charset="utf-8"`)
 	w.WriteHeader(http.StatusMultiStatus)
 	_ = xml.NewEncoder(w).Encode(multistatus{XMLName: xml.Name{Space: "DAV:", Local: "multistatus"}, XMLNSD: "DAV:", Responses: responses})
 }
 
-func (s *Server) responseFor(clean string) propResponse {
-	if clean == "" {
-		return propResponse{Href: "/", Propstat: propstat{Prop: prop{Displayname: "inkflow", ResourceType: resourceType{Collection: &struct{}{}}, ContentType: "httpd/unix-directory"}, Status: "HTTP/1.1 200 OK"}}
-	}
+func (s *Server) responseFor(clean string, info os.FileInfo) propResponse {
 	href := "/" + strings.TrimPrefix(clean, "/")
 	href = escapeHref(href)
 	prop := prop{
-		Displayname:  path.Base(strings.TrimSuffix(clean, "/")),
 		ResourceType: resourceType{},
-		ContentType:  "application/pdf",
+		LastModified: info.ModTime().UTC().Format(http.TimeFormat),
 	}
-	if strings.HasSuffix(clean, "/") {
+	if clean == "" {
+		prop.Displayname = info.Name()
+	} else {
+		prop.Displayname = path.Base(clean)
+	}
+	if info.IsDir() {
 		href = strings.TrimSuffix(href, "/") + "/"
 		prop.ResourceType.Collection = &struct{}{}
 		prop.ContentType = "httpd/unix-directory"
+	} else {
+		size := info.Size()
+		prop.ContentLength = &size
+		prop.ContentType = "application/octet-stream"
 	}
 	return propResponse{Href: href, Propstat: propstat{Prop: prop, Status: "HTTP/1.1 200 OK"}}
+}
+
+// resolveVaultPath decodes and validates a request target before it ever
+// reaches the filesystem. Existing symlinks are deliberately rejected: DAV
+// browsing must not expose a target outside the configured vault.
+func (s *Server) resolveVaultPath(rawPath string) (string, string, os.FileInfo, error) {
+	decoded, err := url.PathUnescape(rawPath)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if strings.Contains(decoded, "\\") {
+		return "", "", nil, errors.New("backslash path separator")
+	}
+	for _, part := range strings.Split(decoded, "/") {
+		if part == ".." {
+			return "", "", nil, errors.New("path traversal")
+		}
+	}
+	clean := cleanPath(decoded)
+	root, err := filepath.Abs(s.cfg.VaultDir)
+	if err != nil {
+		return "", "", nil, err
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", "", nil, err
+	}
+	target := root
+	for _, component := range strings.Split(clean, "/") {
+		if component == "" {
+			continue
+		}
+		target = filepath.Join(target, component)
+		info, err := os.Lstat(target)
+		if err != nil {
+			return "", "", nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", "", nil, errors.New("symlink target")
+		}
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", "", nil, errors.New("path outside vault")
+	}
+	lstat, err := os.Lstat(target)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if lstat.Mode()&os.ModeSymlink != 0 {
+		return "", "", nil, errors.New("symlink target")
+	}
+	return clean, target, lstat, nil
 }
 
 func cleanPath(p string) string {
@@ -296,7 +386,7 @@ type prop struct {
 	ResourceType  resourceType `xml:"D:resourcetype"`
 	Displayname   string       `xml:"D:displayname,omitempty"`
 	LastModified  string       `xml:"D:getlastmodified,omitempty"`
-	ContentLength int64        `xml:"D:getcontentlength,omitempty"`
+	ContentLength *int64       `xml:"D:getcontentlength,omitempty"`
 	ContentType   string       `xml:"D:getcontenttype,omitempty"`
 }
 
