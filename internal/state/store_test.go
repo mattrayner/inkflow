@@ -1,9 +1,12 @@
 package state
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"go.etcd.io/bbolt"
 )
 
 func openTestStore(t *testing.T) *Store {
@@ -135,5 +138,133 @@ func TestGetFailedAIImports_ReturnsMultipleFailed(t *testing.T) {
 	}
 	if len(got) != 3 {
 		t.Errorf("expected 3 failed records, got %d", len(got))
+	}
+}
+
+func TestSaveAndDeleteMaintainIndexes(t *testing.T) {
+	s := openTestStore(t)
+
+	old := &Record{SourcePath: "/sync/old.pdf", SHA256: "old-hash", AIStatus: AIStatusFailed}
+	if err := s.Put(old); err != nil {
+		t.Fatalf("Put(old): %v", err)
+	}
+	replacement := &Record{SourcePath: "/sync/new.pdf", SHA256: "new-hash", AIStatus: AIStatusSuccess}
+	if err := s.Save(old.SourcePath, replacement); err != nil {
+		t.Fatalf("Save(replacement): %v", err)
+	}
+	assertIndexes(t, s, map[string][]string{"new-hash": {"/sync/new.pdf"}}, nil)
+
+	if err := s.Delete(replacement.SourcePath); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	assertIndexes(t, s, map[string][]string{}, nil)
+	if got, err := s.GetBySourcePath(replacement.SourcePath); err != nil || got != nil {
+		t.Fatalf("GetBySourcePath after Delete = %#v, %v; want nil, nil", got, err)
+	}
+}
+
+func TestIndexedLookups(t *testing.T) {
+	s := openTestStore(t)
+	first := &Record{SourcePath: "/sync/a.pdf", SHA256: "shared", AIStatus: AIStatusFailed}
+	second := &Record{SourcePath: "/sync/b.pdf", SHA256: "shared", AIStatus: AIStatusSuccess}
+	if err := s.Put(first); err != nil {
+		t.Fatalf("Put(first): %v", err)
+	}
+	if err := s.Put(second); err != nil {
+		t.Fatalf("Put(second): %v", err)
+	}
+	assertIndexes(t, s, map[string][]string{"shared": {first.SourcePath, second.SourcePath}}, []string{first.SourcePath})
+
+	got, err := s.GetByHash("shared")
+	if err != nil || got == nil || got.SourcePath != first.SourcePath {
+		t.Fatalf("GetByHash(shared) = %#v, %v; want %q", got, err, first.SourcePath)
+	}
+	failed, err := s.GetFailedAIImports()
+	if err != nil || len(failed) != 1 || failed[0].SourcePath != first.SourcePath {
+		t.Fatalf("GetFailedAIImports = %#v, %v; want %q", failed, err, first.SourcePath)
+	}
+}
+
+func TestOpenBackfillsLegacyIndexes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	legacy := &Record{SourcePath: "/sync/legacy.pdf", SHA256: "legacy-hash", AIStatus: AIStatusFailed}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("Marshal legacy record: %v", err)
+	}
+	db, err := bbolt.Open(path, 0o600, nil)
+	if err != nil {
+		t.Fatalf("Open fixture DB: %v", err)
+	}
+	if err := db.Update(func(tx *bbolt.Tx) error {
+		bucket, err := tx.CreateBucket(recordsBucket)
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(legacy.SourcePath), data)
+	}); err != nil {
+		_ = db.Close()
+		t.Fatalf("Write fixture DB: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close fixture DB: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open legacy DB: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	assertIndexes(t, s, map[string][]string{legacy.SHA256: {legacy.SourcePath}}, []string{legacy.SourcePath})
+	if got, err := s.GetByHash(legacy.SHA256); err != nil || got == nil || got.SourcePath != legacy.SourcePath {
+		t.Fatalf("GetByHash after backfill = %#v, %v", got, err)
+	}
+}
+
+func assertIndexes(t *testing.T, s *Store, hashes map[string][]string, failed []string) {
+	t.Helper()
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		hashB := tx.Bucket(hashIndexBucket)
+		failedB := tx.Bucket(failedIndexBucket)
+		if hashB == nil || failedB == nil {
+			t.Fatal("index buckets must exist")
+		}
+		for hash, paths := range hashes {
+			pathsB := hashB.Bucket(hashIndexKey(hash))
+			if pathsB == nil {
+				t.Fatalf("missing hash index for %q", hash)
+			}
+			for _, path := range paths {
+				if got := pathsB.Get([]byte(path)); string(got) != path {
+					t.Fatalf("hash index %q[%q] = %q", hash, path, got)
+				}
+			}
+			if pathsB.Stats().KeyN != len(paths) {
+				t.Fatalf("hash index %q has %d entries; want %d", hash, pathsB.Stats().KeyN, len(paths))
+			}
+		}
+		bucketCount := 0
+		if err := hashB.ForEach(func(_, v []byte) error {
+			if v == nil {
+				bucketCount++
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if bucketCount != len(hashes) {
+			t.Fatalf("hash index has %d buckets; want %d", bucketCount, len(hashes))
+		}
+		for _, path := range failed {
+			if got := failedB.Get([]byte(path)); string(got) != path {
+				t.Fatalf("failed index[%q] = %q", path, got)
+			}
+		}
+		if failedB.Stats().KeyN != len(failed) {
+			t.Fatalf("failed index has %d entries; want %d", failedB.Stats().KeyN, len(failed))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("inspect indexes: %v", err)
 	}
 }
