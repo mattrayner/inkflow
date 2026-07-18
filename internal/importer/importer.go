@@ -55,25 +55,34 @@ func (i *Importer) Import(ctx context.Context, input string, reader io.Reader, m
 		return nil, err
 	}
 	slog.Default().Debug("route_matched", "source", input, "pdf_rel", t.PDFRel, "note_rel", t.NoteRel, "template", t.Template, "ai", t.AI)
-	existing, err := i.lookupRecord(input, sha)
+	existing, hashMatch, err := i.lookupRecord(input, sha)
 	if err != nil {
 		return nil, err
 	}
-	// Dedup: if we already imported the exact same bytes into the same vault
-	// paths, there's nothing useful to redo — the PDF on disk is identical,
-	// the marker blocks already hold the previous AI output, and a re-run
-	// would only burn Gemini tokens and produce visible flicker. A route
-	// change (different PDFRel/NoteRel) bypasses dedup so files land in the
-	// new location.
-	if existing != nil && existing.VaultPDFPath == t.PDFRel && existing.VaultNotePath == t.NoteRel {
-		if existing.SHA256 == sha {
-			if existing.SourcePath == input && existing.ContentHash != "" {
-				slog.Default().Info("dedup_skipped", "source", input, "sha256", sha, "note", t.NoteRel, "pdf", t.PDFRel)
-				return existing, nil
-			}
-			// Backfill legacy records and preserve exact-hash rename handling.
+	// Dedup: if we already imported the exact same bytes, there's nothing
+	// useful to redo — the PDF on disk is identical, the marker blocks
+	// already hold the previous AI output, and a re-run would only burn AI
+	// tokens and produce visible flicker.
+	if existing != nil && existing.SHA256 == sha {
+		samePaths := existing.VaultPDFPath == t.PDFRel && existing.VaultNotePath == t.NoteRel
+		if samePaths && existing.SourcePath == input && existing.ContentHash != "" {
+			slog.Default().Info("dedup_skipped", "source", input, "sha256", sha, "note", t.NoteRel, "pdf", t.PDFRel)
+			return existing, nil
+		}
+		if hashMatch {
+			// Content is byte-identical to a previously imported record found
+			// only via the hash index (rename and/or a route change moved the
+			// output paths). Relocate the existing PDF/note atomically instead
+			// of reprocessing.
+			return i.relocate(existing, input, modTime, t)
+		}
+		if samePaths {
+			// Backfill legacy records (missing ContentHash) that were found
+			// via source path with an exact-hash match and unchanged paths.
 			return i.refreshRecord(existing, input, modTime, sha, contentHash, int64(len(data)))
 		}
+	}
+	if existing != nil && existing.VaultPDFPath == t.PDFRel && existing.VaultNotePath == t.NoteRel {
 		// Only use the stable fingerprint for the same WebDAV source. A rename
 		// can change filename-derived title or tags even when the PDF is
 		// unchanged, so it must continue through the normal import path.
@@ -124,14 +133,112 @@ func (i *Importer) refreshWrapper(existing *state.Record, sourcePath string, mod
 	return existing, nil
 }
 
-func (i *Importer) lookupRecord(sourcePath, sha string) (*state.Record, error) {
+// lookupRecord returns whether the record came from a hash match rather than
+// the source-path index. Hash matches are not rebound until their import
+// outcome has committed, so relocation failures leave state unchanged.
+func (i *Importer) lookupRecord(sourcePath, sha string) (*state.Record, bool, error) {
 	if old, err := i.store.GetBySourcePath(sourcePath); err != nil {
-		return nil, err
+		return nil, false, err
 	} else if old != nil {
-		return old, nil
+		return old, false, nil
 	}
 
-	return i.store.GetByHash(sha)
+	old, err := i.store.GetByHash(sha)
+	if err != nil || old == nil {
+		return old, false, err
+	}
+	return old, true, nil
+}
+
+// relocate preserves an existing hash-matched PDF/note pair exactly while
+// rebinding it to a newly rendered source and vault paths. It copies first and
+// removes old paths only after the state update succeeds, so a failed move
+// cannot discard the original artifacts.
+func (i *Importer) relocate(existing *state.Record, sourcePath string, modTime time.Time, t plan.Result) (*state.Record, error) {
+	oldPDF := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(existing.VaultPDFPath))
+	oldNote := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(existing.VaultNotePath))
+	newPDF := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(t.PDFRel))
+	newNote := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(t.NoteRel))
+
+	createdPDF, err := relocateFile(oldPDF, newPDF)
+	if err != nil {
+		return nil, fmt.Errorf("relocate PDF: %w", err)
+	}
+	createdNote, err := relocateFile(oldNote, newNote)
+	if err != nil {
+		if createdPDF {
+			_ = os.Remove(newPDF)
+		}
+		return nil, fmt.Errorf("relocate note: %w", err)
+	}
+
+	previousSourcePath := existing.SourcePath
+	updated := *existing
+	updated.SourcePath = sourcePath
+	updated.VaultPDFPath = t.PDFRel
+	updated.VaultNotePath = t.NoteRel
+	updated.SourceModTime = modTime
+	updated.ImportedAt = time.Now().UTC()
+	if info, err := os.Stat(newPDF); err != nil {
+		return nil, fmt.Errorf("relocate PDF stat: %w", err)
+	} else {
+		updated.SourceSize = info.Size()
+	}
+	if err := i.saveRecordOutput(previousSourcePath, &updated); err != nil {
+		if createdPDF {
+			_ = os.Remove(newPDF)
+		}
+		if createdNote {
+			_ = os.Remove(newNote)
+		}
+		return nil, err
+	}
+	if oldPDF != newPDF {
+		_ = os.Remove(oldPDF)
+	}
+	if oldNote != newNote {
+		_ = os.Remove(oldNote)
+	}
+	*existing = updated
+	logImported(sourcePath, t.NoteRel, t.PDFRel)
+	return existing, nil
+}
+
+// relocateFile copies to a non-existent destination. Its boolean result says
+// whether this invocation created a destination that may be cleaned up on a
+// later failure.
+func relocateFile(source, destination string) (bool, error) {
+	if source == destination {
+		if _, err := os.Stat(source); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	input, err := os.Open(source)
+	if err != nil {
+		return false, err
+	}
+	defer input.Close()
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return false, err
+	}
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return false, fmt.Errorf("destination already exists: %s", destination)
+		}
+		return false, err
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		_ = output.Close()
+		_ = os.Remove(destination)
+		return false, err
+	}
+	if err := output.Close(); err != nil {
+		_ = os.Remove(destination)
+		return false, err
+	}
+	return true, nil
 }
 
 func (i *Importer) refreshRecord(existing *state.Record, sourcePath string, modTime time.Time, sha, contentHash string, size int64) (*state.Record, error) {

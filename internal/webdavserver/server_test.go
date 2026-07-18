@@ -447,7 +447,7 @@ func TestPutMetadataOnlyPDFChangeSkipsAICall(t *testing.T) {
 	imp := importer.New(cfg, store, countingAIClient{
 		result: ai.Result{OCR: "transcript", Summary: []string{"bullet"}},
 		calls:  &calls,
-	})
+	}, 0)
 	srv := &Server{cfg: cfg, imp: imp}
 
 	bodies := [][]byte{
@@ -485,7 +485,7 @@ func TestPutActualPDFContentChangeCallsAIAgain(t *testing.T) {
 	imp := importer.New(cfg, store, countingAIClient{
 		result: ai.Result{OCR: "transcript", Summary: []string{"bullet"}},
 		calls:  &calls,
-	})
+	}, 0)
 	srv := &Server{cfg: cfg, imp: imp}
 
 	for n, stroke := range []string{"first stroke", "second stroke"} {
