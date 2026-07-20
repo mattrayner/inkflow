@@ -23,6 +23,11 @@ type Route struct {
 	PDFName  string `toml:"pdf_name" json:"pdf_name"`
 	Template string `toml:"template" json:"template"`
 	AI       bool   `toml:"ai" json:"ai"`
+	// KeepDatestamp, when true, keeps the leading YYYY-MM-DD datestamp in
+	// the parsed title instead of stripping it. The date is still detected
+	// and used for {date} filename placeholders; only title stripping is
+	// skipped. Default false preserves current stripping behavior.
+	KeepDatestamp bool `toml:"keep_datestamp" json:"keep_datestamp"`
 }
 
 type GeminiConfig struct {
