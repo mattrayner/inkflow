@@ -1,11 +1,24 @@
 package config
 
-import "time"
+import (
+	"path"
+	"strings"
+	"time"
+)
 
 type Config struct {
-	ListenAddr string `toml:"listen_addr" json:"listen_addr"`
-	WebDAVUser string `toml:"webdav_user" json:"webdav_user"`
-	WebDAVPass string `toml:"webdav_pass" json:"webdav_pass"`
+	ListenAddr                string        `toml:"listen_addr" json:"listen_addr"`
+	WebDAVUser                string        `toml:"webdav_user" json:"webdav_user"`
+	WebDAVPass                string        `toml:"webdav_pass" json:"webdav_pass"`
+	ReadHeaderTimeout         string        `toml:"read_header_timeout" json:"read_header_timeout"`
+	ReadTimeout               string        `toml:"read_timeout" json:"read_timeout"`
+	WriteTimeout              string        `toml:"write_timeout" json:"write_timeout"`
+	IdleTimeout               string        `toml:"idle_timeout" json:"idle_timeout"`
+	MaxUploadBytes            int64         `toml:"max_upload_bytes" json:"max_upload_bytes"`
+	ReadHeaderTimeoutDuration time.Duration `toml:"-" json:"-"`
+	ReadTimeoutDuration       time.Duration `toml:"-" json:"-"`
+	WriteTimeoutDuration      time.Duration `toml:"-" json:"-"`
+	IdleTimeoutDuration       time.Duration `toml:"-" json:"-"`
 
 	TemplateDir    string `toml:"template_dir" json:"template_dir"`
 	VaultDir       string `toml:"vault_dir" json:"vault_dir"`
@@ -19,6 +32,18 @@ type Config struct {
 	Routes []Route      `toml:"route" json:"route"`
 }
 
+// NormalizeRoutePrefix returns the canonical form used for route matching.
+func NormalizeRoutePrefix(prefix string) string {
+	prefix = strings.ReplaceAll(prefix, "\\", "/")
+	if prefix == "" {
+		return ""
+	}
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	return path.Clean(prefix) + "/"
+}
+
 type Route struct {
 	From     string `toml:"from" json:"from"`
 	PDFDir   string `toml:"pdf_dir" json:"pdf_dir"`
@@ -27,6 +52,12 @@ type Route struct {
 	PDFName  string `toml:"pdf_name" json:"pdf_name"`
 	Template string `toml:"template" json:"template"`
 	AI       bool   `toml:"ai" json:"ai"`
+	// TagMergeStrategy is "merge" by default; "replace" retains the legacy
+	// filename-authoritative tag behavior.
+	TagMergeStrategy string `toml:"tag_merge_strategy" json:"tag_merge_strategy"`
+	// Nil means the default true. A pointer distinguishes an omitted value from
+	// an explicit TOML false.
+	PreserveMarkerOnAIFailure *bool `toml:"preserve_marker_on_ai_failure" json:"preserve_marker_on_ai_failure"`
 }
 
 type GeminiConfig struct {

@@ -131,3 +131,15 @@ func TestBuildPropagatesRouteAIFlag(t *testing.T) {
 		t.Fatal("expected AI flag to propagate")
 	}
 }
+
+func TestBuildPropagatesNoteUpdatePolicies(t *testing.T) {
+	falseValue := false
+	routes := []config.Route{{From: "Syncs/", TagMergeStrategy: "replace", PreserveMarkerOnAIFailure: &falseValue}}
+	got, err := Build(routes, &config.Config{DefaultPDFDir: "pdfs", DefaultNoteDir: "notes"}, "Syncs/note.pdf", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TagMergeStrategy != "replace" || got.PreserveMarkerOnAIFailure {
+		t.Fatalf("note policies = %+v", got)
+	}
+}

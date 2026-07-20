@@ -8,9 +8,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// UpdateTags merges filename-derived tags into existing scalar tags.
 func UpdateTags(content string, tags []string) string {
+	return UpdateTagsWithStrategy(content, tags, "merge")
+}
+
+// UpdateTagsWithStrategy updates tags using either merge or replace semantics.
+func UpdateTagsWithStrategy(content string, tags []string, strategy string) string {
 	uniq := uniqueTags(tags)
-	if len(uniq) == 0 {
+	if len(uniq) == 0 && strategy != "replace" {
 		return content
 	}
 	front, body, ok := splitFrontmatter(content)
@@ -21,6 +27,9 @@ func UpdateTags(content string, tags []string) string {
 	if err != nil {
 		return renderWithFrontmatter(content, uniq)
 	}
+	if strategy != "replace" {
+		uniq = mergeTags(existingTags(doc), uniq)
+	}
 	replaceTags(doc, uniq)
 	rendered, err := yaml.Marshal(doc)
 	if err != nil {
@@ -28,6 +37,30 @@ func UpdateTags(content string, tags []string) string {
 	}
 	rendered = bytes.TrimSpace(rendered)
 	return "---\n" + string(rendered) + "\n---\n" + body
+}
+
+func existingTags(doc *yaml.Node) []string {
+	if doc.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(doc.Content); i += 2 {
+		key, value := doc.Content[i], doc.Content[i+1]
+		if key == nil || key.Kind != yaml.ScalarNode || key.Value != "tags" || value == nil || value.Kind != yaml.SequenceNode {
+			continue
+		}
+		tags := make([]string, 0, len(value.Content))
+		for _, item := range value.Content {
+			if item != nil && item.Kind == yaml.ScalarNode {
+				tags = append(tags, item.Value)
+			}
+		}
+		return tags
+	}
+	return nil
+}
+
+func mergeTags(existing, incoming []string) []string {
+	return uniqueTags(append(append([]string(nil), existing...), incoming...))
 }
 
 func splitFrontmatter(content string) (front string, body string, ok bool) {

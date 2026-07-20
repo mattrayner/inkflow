@@ -75,3 +75,18 @@ func TestUpsertMarkerBlockWhitespaceBodyIsNoOp(t *testing.T) {
 		t.Fatalf("whitespace body mutated content:\n%s", got)
 	}
 }
+
+func TestUpsertMarkerBlockPreservesSuccessfulContentOnFailure(t *testing.T) {
+	content := UpsertMarkerBlock("", "OCR", "ocr", "previous transcription")
+	got := UpsertMarkerBlockWithFailurePolicy(content, "OCR", "ocr", "_AI failed: unavailable_", true)
+	if got != content {
+		t.Fatalf("failure replaced successful marker: %q", got)
+	}
+}
+
+func TestUpsertMarkerBlockWritesFailureWithoutPriorSuccess(t *testing.T) {
+	got := UpsertMarkerBlockWithFailurePolicy("", "OCR", "ocr", "_AI failed: unavailable_", true)
+	if !strings.Contains(got, "_AI failed: unavailable_") {
+		t.Fatalf("failure marker missing from %q", got)
+	}
+}
