@@ -19,7 +19,7 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) (*Client, *httptest.S
 	c := New(ClientConfig{
 		Endpoint:      srv.URL,
 		APIKey:        "test-key",
-		Model:         "gemini-2.5-flash",
+		Model:         "gemini-3.5-flash",
 		Timeout:       2 * time.Second,
 		OCRPrompt:     "Transcribe faithfully",
 		SummaryPrompt: "Summarize as 3 bullets",
@@ -59,7 +59,7 @@ func TestProcessHappyPathParsesJSONResponse(t *testing.T) {
 	if len(res.Summary) != 3 || res.Summary[0] != "a" {
 		t.Errorf("Summary = %v", res.Summary)
 	}
-	if gotPath != "/v1beta/models/gemini-2.5-flash:generateContent" {
+	if gotPath != "/v1beta/models/gemini-3.5-flash:generateContent" {
 		t.Errorf("path = %q", gotPath)
 	}
 	if gotAPIKeyHeader != "test-key" {
@@ -141,7 +141,7 @@ func TestProcessNetworkError(t *testing.T) {
 	c := New(ClientConfig{
 		Endpoint:      "http://127.0.0.1:1", // refused
 		APIKey:        "test-key",
-		Model:         "gemini-2.5-flash",
+		Model:         "gemini-3.5-flash",
 		Timeout:       200 * time.Millisecond,
 		OCRPrompt:     "x",
 		SummaryPrompt: "y",

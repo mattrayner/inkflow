@@ -120,6 +120,33 @@ func TestBuildStripsHashtagsFromTitle(t *testing.T) {
 	}
 }
 
+func TestBuildKeepDatestampPreservesDateInTitle(t *testing.T) {
+	routes := []config.Route{{From: "Journal/", KeepDatestamp: true}}
+	cfg := &config.Config{DefaultPDFDir: "pdfs", DefaultNoteDir: "notes"}
+	got, err := Build(routes, cfg, "Journal/2026-07-20 Monday.pdf", time.Date(2026, 7, 20, 11, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Title != "2026-07-20 Monday" {
+		t.Fatalf("title = %q", got.Title)
+	}
+	if got.Date.Format("2006-01-02") != "2026-07-20" {
+		t.Fatalf("date = %s", got.Date.Format("2006-01-02"))
+	}
+}
+
+func TestBuildDefaultStripsDatestamp(t *testing.T) {
+	routes := []config.Route{{From: "Journal/"}}
+	cfg := &config.Config{DefaultPDFDir: "pdfs", DefaultNoteDir: "notes"}
+	got, err := Build(routes, cfg, "Journal/2026-07-20 Monday.pdf", time.Date(2026, 7, 20, 11, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Title != "Monday" {
+		t.Fatalf("title = %q", got.Title)
+	}
+}
+
 func TestBuildPropagatesRouteAIFlag(t *testing.T) {
 	routes := []config.Route{{From: "Syncs/", AI: true}}
 	cfg := &config.Config{DefaultPDFDir: "pdfs", DefaultNoteDir: "notes"}

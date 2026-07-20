@@ -52,7 +52,7 @@ func Build(routes []config.Route, defaults *config.Config, input string, now tim
 		noteName = "{date} {stem}.md"
 	}
 	stem := strings.TrimSuffix(path.Base(input), path.Ext(input))
-	date, title, tags := parseStem(stem, now)
+	date, title, tags := parseStem(stem, now, r.KeepDatestamp)
 	slug := util.Slug(title)
 	ext := strings.TrimPrefix(path.Ext(input), ".")
 	pdfPattern := RenderPattern(pdfName, date, title, slug, ext)
@@ -69,13 +69,15 @@ func Build(routes []config.Route, defaults *config.Config, input string, now tim
 	}, nil
 }
 
-func parseStem(stem string, fallback time.Time) (time.Time, string, []string) {
+func parseStem(stem string, fallback time.Time, keepDatestamp bool) (time.Time, string, []string) {
 	date := fallback
 	title := strings.TrimSpace(stem)
 	if len(title) >= len(fileDatePrefix) {
 		if parsed, err := time.Parse(fileDatePrefix, title[:len(fileDatePrefix)]); err == nil {
 			date = parsed
-			title = strings.TrimSpace(title[len(fileDatePrefix):])
+			if !keepDatestamp {
+				title = strings.TrimSpace(title[len(fileDatePrefix):])
+			}
 		}
 	}
 	tags := make([]string, 0)
