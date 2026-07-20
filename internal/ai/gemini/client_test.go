@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -209,5 +210,67 @@ func TestProcessUnescapesDoublyEscapedNewlines(t *testing.T) {
 	}
 	if res.Summary[1] != "plain bullet" {
 		t.Errorf("plain bullet got mangled: %q", res.Summary[1])
+	}
+}
+
+func TestIsRetryable(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "429 rate limited",
+			err:  &APIError{StatusCode: 429, Message: "rate limited"},
+			want: true,
+		},
+		{
+			name: "500 internal server error",
+			err:  &APIError{StatusCode: 500, Message: "internal server error"},
+			want: true,
+		},
+		{
+			name: "503 service unavailable",
+			err:  &APIError{StatusCode: 503, Message: "service unavailable"},
+			want: true,
+		},
+		{
+			name: "401 unauthorized",
+			err:  &APIError{StatusCode: 401, Message: "API key invalid"},
+			want: false,
+		},
+		{
+			name: "403 forbidden",
+			err:  &APIError{StatusCode: 403, Message: "access denied"},
+			want: false,
+		},
+		{
+			name: "400 bad request",
+			err:  &APIError{StatusCode: 400, Message: "invalid request"},
+			want: false,
+		},
+		{
+			name: "network error (no HTTP status)",
+			err:  errors.New("connection refused"),
+			want: true,
+		},
+		{
+			name: "unknown error",
+			err:  errors.New("something completely unknown"),
+			want: true,
+		},
+		{
+			name: "nil",
+			err:  nil,
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsRetryable(tc.err)
+			if got != tc.want {
+				t.Errorf("IsRetryable(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

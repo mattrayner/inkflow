@@ -16,6 +16,7 @@ import (
 	"inkflow/internal/config"
 	"inkflow/internal/importer"
 	"inkflow/internal/log"
+	"inkflow/internal/retry"
 	"inkflow/internal/state"
 	"inkflow/internal/webdavserver"
 )
@@ -27,10 +28,11 @@ var (
 )
 
 type runtime struct {
-	logger *slog.Logger
-	cfg    *config.Config
-	store  *state.Store
-	imp    *importer.Importer
+	logger    *slog.Logger
+	cfg       *config.Config
+	store     *state.Store
+	imp       *importer.Importer
+	scheduler *retry.Scheduler
 }
 
 var rt runtime
@@ -109,7 +111,13 @@ func loadRuntime(logger *slog.Logger, configPath string) (runtime, error) {
 		return runtime{}, err
 	}
 	imp := importer.New(cfg, store, aiProvider)
-	return runtime{logger: logger, cfg: cfg, store: store, imp: imp}, nil
+
+	var sched *retry.Scheduler
+	if cfg.Gemini.Retry.Enabled {
+		sched = retry.NewScheduler(store, imp, cfg.Gemini.Retry)
+	}
+
+	return runtime{logger: logger, cfg: cfg, store: store, imp: imp, scheduler: sched}, nil
 }
 
 func defaultStatePath() string {
@@ -154,7 +162,14 @@ func newServeCmd() *cobra.Command {
 		Short: "Serve BOOX uploads over WebDAV",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return webdavserver.Serve(cmd.Context(), rt.cfg, rt.imp, rt.logger)
+			if rt.scheduler != nil {
+				rt.scheduler.Start(cmd.Context())
+			}
+			err := webdavserver.Serve(cmd.Context(), rt.cfg, rt.imp, rt.logger)
+			if rt.scheduler != nil {
+				rt.scheduler.Stop()
+			}
+			return err
 		},
 	}
 }

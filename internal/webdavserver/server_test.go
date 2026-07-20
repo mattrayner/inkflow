@@ -322,3 +322,182 @@ func TestPutDuplicateUploadSkipsAICall(t *testing.T) {
 		t.Errorf("expected ai.Provider.Process called exactly once across two identical uploads, got %d", calls)
 	}
 }
+
+func TestPutAISuccessStoresAIStatusSuccess(t *testing.T) {
+	vaultDir := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "state.db")
+	store, err := state.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		VaultDir:       vaultDir,
+		DefaultPDFDir:  "pdfs",
+		DefaultNoteDir: "notes",
+		Routes:         []config.Route{{From: "Syncs/", Template: "default", AI: true}},
+	}
+	imp := importer.New(cfg, store, fakeAIClient{
+		result: ai.Result{OCR: "some text", Summary: []string{"bullet one"}},
+	})
+	srv := &Server{cfg: cfg, imp: imp}
+
+	req := httptest.NewRequest("PUT", "/Syncs/2026-07-01%20success.pdf", bytes.NewReader([]byte("pdf-content")))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	stored, err := store.GetBySourcePath("Syncs/2026-07-01 success.pdf")
+	if err != nil {
+		t.Fatalf("GetBySourcePath: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("no record stored")
+	}
+	if stored.AIStatus != state.AIStatusSuccess {
+		t.Errorf("AIStatus = %q, want %q", stored.AIStatus, state.AIStatusSuccess)
+	}
+	if stored.AIRetryCount != 1 {
+		t.Errorf("AIRetryCount = %d, want 1", stored.AIRetryCount)
+	}
+	if stored.AILastError != "" {
+		t.Errorf("AILastError = %q, want empty string", stored.AILastError)
+	}
+	if stored.AILastRetryAt.IsZero() {
+		t.Error("AILastRetryAt is zero, want a non-zero timestamp")
+	}
+}
+
+func TestPutAIFailureStoresAIStatusFailed(t *testing.T) {
+	vaultDir := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "state.db")
+	store, err := state.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		VaultDir:       vaultDir,
+		DefaultPDFDir:  "pdfs",
+		DefaultNoteDir: "notes",
+		Routes:         []config.Route{{From: "Syncs/", Template: "default", AI: true}},
+	}
+	imp := importer.New(cfg, store, fakeAIClient{
+		err: errors.New("gemini 503: service unavailable"),
+	})
+	srv := &Server{cfg: cfg, imp: imp}
+
+	req := httptest.NewRequest("PUT", "/Syncs/2026-07-01%20failure.pdf", bytes.NewReader([]byte("pdf-content")))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Existing behaviour: error text is written into the note.
+	body, err := os.ReadFile(filepath.Join(vaultDir, "notes", "2026-07-01 failure.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "_AI failed: gemini 503: service unavailable_") {
+		t.Errorf("error marker block missing from note:\n%s", string(body))
+	}
+
+	// New behaviour: AI status is persisted in the state record.
+	stored, err := store.GetBySourcePath("Syncs/2026-07-01 failure.pdf")
+	if err != nil {
+		t.Fatalf("GetBySourcePath: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("no record stored")
+	}
+	if stored.AIStatus != state.AIStatusFailed {
+		t.Errorf("AIStatus = %q, want %q", stored.AIStatus, state.AIStatusFailed)
+	}
+	if stored.AIRetryCount != 1 {
+		t.Errorf("AIRetryCount = %d, want 1", stored.AIRetryCount)
+	}
+	if stored.AILastError == "" {
+		t.Error("AILastError is empty, want error message")
+	}
+	if stored.AILastRetryAt.IsZero() {
+		t.Error("AILastRetryAt is zero, want a non-zero timestamp")
+	}
+}
+
+func TestPutMetadataOnlyPDFChangeSkipsAICall(t *testing.T) {
+	vaultDir := t.TempDir()
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		VaultDir:       vaultDir,
+		DefaultPDFDir:  "pdfs",
+		DefaultNoteDir: "notes",
+		Routes:         []config.Route{{From: "Syncs/", Template: "default", AI: true}},
+	}
+	calls := 0
+	imp := importer.New(cfg, store, countingAIClient{
+		result: ai.Result{OCR: "transcript", Summary: []string{"bullet"}},
+		calls:  &calls,
+	})
+	srv := &Server{cfg: cfg, imp: imp}
+
+	bodies := [][]byte{
+		[]byte("%PDF-1.7\n1 0 obj << /ModDate (D:20260720100000Z) >> stream\nstroke\nendstream endobj\ntrailer << /ID [<1111><2222>] >>\n%%EOF"),
+		[]byte("%PDF-1.7\n1 0 obj << /ModDate (D:20260721100000Z) >> stream\nstroke\nendstream endobj\ntrailer << /ID [<aaaa><bbbb>] >>\n%%EOF"),
+	}
+	for n, body := range bodies {
+		req := httptest.NewRequest("PUT", "/Syncs/2026-06-04%20stable.pdf", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != 201 {
+			t.Fatalf("attempt %d: status = %d body=%s", n, rec.Code, rec.Body.String())
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("expected metadata-only re-export to skip AI, got %d calls", calls)
+	}
+}
+
+func TestPutActualPDFContentChangeCallsAIAgain(t *testing.T) {
+	vaultDir := t.TempDir()
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	cfg := &config.Config{
+		VaultDir:       vaultDir,
+		DefaultPDFDir:  "pdfs",
+		DefaultNoteDir: "notes",
+		Routes:         []config.Route{{From: "Syncs/", Template: "default", AI: true}},
+	}
+	calls := 0
+	imp := importer.New(cfg, store, countingAIClient{
+		result: ai.Result{OCR: "transcript", Summary: []string{"bullet"}},
+		calls:  &calls,
+	})
+	srv := &Server{cfg: cfg, imp: imp}
+
+	for n, stroke := range []string{"first stroke", "second stroke"} {
+		body := []byte("%PDF-1.7\n1 0 obj << /ModDate (D:20260720100000Z) >> stream\n" + stroke + "\nendstream endobj\n%%EOF")
+		req := httptest.NewRequest("PUT", "/Syncs/2026-06-04%20changed.pdf", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != 201 {
+			t.Fatalf("attempt %d: status = %d body=%s", n, rec.Code, rec.Body.String())
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("expected real content change to call AI again, got %d calls", calls)
+	}
+}

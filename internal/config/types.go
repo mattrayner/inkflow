@@ -1,5 +1,7 @@
 package config
 
+import "time"
+
 type Config struct {
 	ListenAddr string `toml:"listen_addr" json:"listen_addr"`
 	WebDAVUser string `toml:"webdav_user" json:"webdav_user"`
@@ -36,4 +38,15 @@ type GeminiConfig struct {
 	Timeout       string `toml:"timeout" json:"timeout"`
 	OCRPrompt     string `toml:"ocr_prompt" json:"ocr_prompt"`
 	SummaryPrompt string `toml:"summary_prompt" json:"summary_prompt"`
+
+	Retry RetryConfig `toml:"retry" json:"retry"`
+}
+
+// RetryConfig holds configuration for automatic AI retry on failure.
+// BackoffDuration is populated by validate() from Backoff and is not a TOML field.
+type RetryConfig struct {
+	Enabled         bool          `toml:"enabled" json:"enabled"`
+	MaxRetries      int           `toml:"max_retries" json:"max_retries"`
+	Backoff         string        `toml:"backoff" json:"backoff"`
+	BackoffDuration time.Duration `toml:"-" json:"-"`
 }
