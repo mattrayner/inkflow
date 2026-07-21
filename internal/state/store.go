@@ -18,13 +18,28 @@ const (
 )
 
 var (
-	recordsBucket     = []byte("records")
-	hashIndexBucket   = []byte("hash_index")
-	failedIndexBucket = []byte("failed_index")
+	recordsBucket        = []byte("records")
+	hashIndexBucket      = []byte("hash_index")
+	failedIndexBucket    = []byte("failed_index")
+	deadPropertiesBucket = []byte("dead_properties")
 )
 
 type Store struct {
 	db *bbolt.DB
+}
+
+// DeadProperty is a WebDAV property stored independently from an imported
+// resource record. Value contains the property's XML inner content.
+type DeadProperty struct {
+	Namespace string `json:"namespace"`
+	Local     string `json:"local"`
+	Value     string `json:"value"`
+}
+
+// DeadPropertyChange describes one ordered PROPPATCH set or remove operation.
+type DeadPropertyChange struct {
+	DeadProperty
+	Remove bool
 }
 
 type Record struct {
@@ -95,6 +110,9 @@ func Open(path string) (*Store, error) {
 			return err
 		}
 		if _, err := tx.CreateBucketIfNotExists(failedIndexBucket); err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucketIfNotExists(deadPropertiesBucket); err != nil {
 			return err
 		}
 		if !hashIndexMissing && !failedIndexMissing {
@@ -221,6 +239,62 @@ func (s *Store) Delete(sourcePath string) error {
 			return err
 		}
 		return recB.Delete([]byte(sourcePath))
+	})
+}
+
+// GetDeadProperties returns the persisted custom properties for a vault-relative
+// resource path.
+func (s *Store) GetDeadProperties(resourcePath string) ([]DeadProperty, error) {
+	var properties []DeadProperty
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		value := tx.Bucket(deadPropertiesBucket).Get([]byte(resourcePath))
+		if value == nil {
+			return nil
+		}
+		return json.Unmarshal(value, &properties)
+	})
+	if properties == nil {
+		properties = []DeadProperty{}
+	}
+	return properties, err
+}
+
+// ApplyDeadPropertyChanges applies every change in one Bolt transaction. A
+// caller first validates an entire PROPPATCH request, so a failed request never
+// invokes this method and cannot leave partial property writes behind.
+func (s *Store) ApplyDeadPropertyChanges(resourcePath string, changes []DeadPropertyChange) error {
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket(deadPropertiesBucket)
+		var properties []DeadProperty
+		if value := bucket.Get([]byte(resourcePath)); value != nil {
+			if err := json.Unmarshal(value, &properties); err != nil {
+				return err
+			}
+		}
+		byName := make(map[string]DeadProperty, len(properties))
+		for _, property := range properties {
+			byName[property.Namespace+"\x00"+property.Local] = property
+		}
+		for _, change := range changes {
+			key := change.Namespace + "\x00" + change.Local
+			if change.Remove {
+				delete(byName, key)
+				continue
+			}
+			byName[key] = change.DeadProperty
+		}
+		properties = properties[:0]
+		for _, property := range byName {
+			properties = append(properties, property)
+		}
+		if len(properties) == 0 {
+			return bucket.Delete([]byte(resourcePath))
+		}
+		data, err := json.Marshal(properties)
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(resourcePath), data)
 	})
 }
 

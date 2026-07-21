@@ -231,6 +231,37 @@ func TestOpenBackfillsLegacyIndexes(t *testing.T) {
 	}
 }
 
+func TestDeadPropertiesPersistAndApplyAtomically(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := []DeadPropertyChange{{DeadProperty: DeadProperty{Namespace: "urn:test", Local: "one", Value: "value"}}}
+	if err := s.ApplyDeadPropertyChanges("note.md", changes); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	properties, err := s.GetDeadProperties("note.md")
+	if err != nil || len(properties) != 1 || properties[0].Value != "value" {
+		t.Fatalf("persisted properties = %#v, %v", properties, err)
+	}
+	if err := s.ApplyDeadPropertyChanges("note.md", []DeadPropertyChange{{DeadProperty: properties[0], Remove: true}}); err != nil {
+		t.Fatal(err)
+	}
+	properties, err = s.GetDeadProperties("note.md")
+	if err != nil || len(properties) != 0 {
+		t.Fatalf("removed properties = %#v, %v", properties, err)
+	}
+}
+
 func assertIndexes(t *testing.T, s *Store, hashes map[string][]string, failed []string) {
 	t.Helper()
 	if err := s.db.View(func(tx *bbolt.Tx) error {

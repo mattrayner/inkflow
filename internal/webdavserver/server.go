@@ -103,6 +103,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	case "PROPFIND":
 		s.handlePropfind(w, r)
+	case "PROPPATCH":
+		s.handleProppatch(w, r)
 	case "MKCOL":
 		s.handleMkcol(w, r, clean)
 	case http.MethodPut:
@@ -122,6 +124,9 @@ func capabilityHeaders(cfg *config.Config) (allow, dav string) {
 	methods := []string{"OPTIONS", "PROPFIND", "MKCOL", "PUT"}
 	if cfg != nil && cfg.WebDAV.EnableRetrieval {
 		methods = append(methods, "GET", "HEAD")
+	}
+	if cfg != nil && cfg.WebDAV.EnableMutation {
+		methods = append(methods, "PROPPATCH")
 	}
 	// This increment implements no locking methods, so it must never advertise
 	// DAV Class 2 even if its future-facing configuration flag is set.
@@ -322,31 +327,58 @@ func (s *Server) handlePropfind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	selection, err := parsePropfind(r.Body)
+	if err != nil {
+		http.Error(w, "invalid PROPFIND body", http.StatusBadRequest)
+		return
+	}
 	depth := r.Header.Get("Depth")
-	if depth != "" && depth != "0" && depth != "1" {
+	if depth != "" && depth != "0" && depth != "1" && depth != "infinity" {
 		http.Error(w, "unsupported Depth", http.StatusBadRequest)
 		return
 	}
-	responses := []propResponse{s.responseFor(clean, info)}
-	if depth == "1" && info.IsDir() {
-		entries, err := os.ReadDir(target)
-		if err != nil {
+	response, err := s.responseFor(clean, target, info, selection)
+	if err != nil {
+		http.Error(w, "unable to read resource", http.StatusInternalServerError)
+		return
+	}
+	responses := []propResponse{response}
+	if info.IsDir() && (depth == "1" || depth == "infinity") {
+		if err := s.appendPropfindDescendants(&responses, clean, target, selection, depth == "infinity"); err != nil {
 			http.Error(w, "unable to list resource", http.StatusInternalServerError)
 			return
-		}
-		for _, entry := range entries {
-			childClean := path.Join(clean, entry.Name())
-			_, _, childInfo, err := s.resolveVaultPath("/" + childClean)
-			if err != nil {
-				// Do not follow a symlink (including one that escapes the vault).
-				continue
-			}
-			responses = append(responses, s.responseFor(childClean, childInfo))
 		}
 	}
 	w.Header().Set("Content-Type", `application/xml; charset="utf-8"`)
 	w.WriteHeader(http.StatusMultiStatus)
 	_ = xml.NewEncoder(w).Encode(multistatus{XMLName: xml.Name{Space: "DAV:", Local: "multistatus"}, XMLNSD: "DAV:", Responses: responses})
+}
+
+func (s *Server) appendPropfindDescendants(responses *[]propResponse, clean, target string, selection propfindSelection, recursive bool) error {
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		childClean := path.Join(clean, entry.Name())
+		_, childTarget, childInfo, err := s.resolveVaultPath("/" + childClean)
+		if err != nil {
+			// ReadDir does not follow links; explicitly resolving keeps the same
+			// symlink exclusion policy as every other resource handler.
+			continue
+		}
+		response, err := s.responseFor(childClean, childTarget, childInfo, selection)
+		if err != nil {
+			return err
+		}
+		*responses = append(*responses, response)
+		if recursive && childInfo.IsDir() {
+			if err := s.appendPropfindDescendants(responses, childClean, childTarget, selection, true); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleMkcol(w http.ResponseWriter, r *http.Request, clean string) {
@@ -400,30 +432,6 @@ func (s *Server) handleMkcol(w http.ResponseWriter, r *http.Request, clean strin
 	}
 	s.debug("mkcol_created", "path", clean)
 	w.WriteHeader(http.StatusCreated)
-}
-
-func (s *Server) responseFor(clean string, info os.FileInfo) propResponse {
-	href := "/" + strings.TrimPrefix(clean, "/")
-	href = escapeHref(href)
-	prop := prop{
-		ResourceType: resourceType{},
-		LastModified: info.ModTime().UTC().Format(http.TimeFormat),
-	}
-	if clean == "" {
-		prop.Displayname = info.Name()
-	} else {
-		prop.Displayname = path.Base(clean)
-	}
-	if info.IsDir() {
-		href = strings.TrimSuffix(href, "/") + "/"
-		prop.ResourceType.Collection = &struct{}{}
-		prop.ContentType = "httpd/unix-directory"
-	} else {
-		size := info.Size()
-		prop.ContentLength = &size
-		prop.ContentType = "application/octet-stream"
-	}
-	return propResponse{Href: href, Propstat: propstat{Prop: prop, Status: "HTTP/1.1 200 OK"}}
 }
 
 func (s *Server) resolveVaultPath(rawPath string) (string, string, os.FileInfo, error) {
@@ -512,8 +520,8 @@ type multistatus struct {
 }
 
 type propResponse struct {
-	Href     string   `xml:"D:href"`
-	Propstat propstat `xml:"D:propstat"`
+	Href      string     `xml:"D:href"`
+	Propstats []propstat `xml:"D:propstat"`
 }
 
 type propstat struct {
@@ -522,13 +530,20 @@ type propstat struct {
 }
 
 type prop struct {
-	ResourceType  resourceType `xml:"D:resourcetype"`
-	Displayname   string       `xml:"D:displayname,omitempty"`
-	LastModified  string       `xml:"D:getlastmodified,omitempty"`
-	ContentLength *int64       `xml:"D:getcontentlength,omitempty"`
-	ContentType   string       `xml:"D:getcontenttype,omitempty"`
+	Properties []davProperty
 }
 
-type resourceType struct {
-	Collection *struct{} `xml:"D:collection,omitempty"`
+func (p prop) MarshalXML(encoder *xml.Encoder, start xml.StartElement) error {
+	if start.Name.Local == "" {
+		start.Name.Local = "D:prop"
+	}
+	if err := encoder.EncodeToken(start); err != nil {
+		return err
+	}
+	for _, property := range p.Properties {
+		if err := encoder.Encode(property); err != nil {
+			return err
+		}
+	}
+	return encoder.EncodeToken(start.End())
 }
