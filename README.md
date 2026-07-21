@@ -40,11 +40,15 @@ The resulting file as it appears in Obsidian.
 `[webdav].enable_retrieval` defaults to `true` and enables authenticated `GET`
 and `HEAD` access to vault resources. Retrieval rejects traversal and symlinked
 paths just like WebDAV collection browsing. `enable_mutation` and
-`enable_locking` default to `false`; they are configuration gates for optional
-mutation and locking support and do not expose those methods in this release.
+`enable_locking` default to `false`. Mutation enables `DELETE`, `COPY`,
+`MOVE`, and `PROPPATCH`; locking enables `LOCK`, `UNLOCK`, and write-lock
+enforcement.
 
-`OPTIONS` advertises `DAV: 1`; Class 2 (`DAV: 2`) is not advertised without
-implemented locking support.
+The advertised DAV class reflects the enabled capability tier: no `DAV`
+compliance-class header while mutation is disabled, `DAV: 1` with mutation,
+and `DAV: 1, 2` with both mutation and locking enabled. Locking may be enabled
+without mutation, but it is not advertised as a DAV Class 2 server until the
+full Class 1 method set is also enabled.
 
 ### Health and metrics
 

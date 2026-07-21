@@ -291,6 +291,9 @@ func (s *Server) handleProppatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
+	if !s.requireLocks(w, r, clean) {
+		return
+	}
 	operations, err := parseProppatch(r.Body)
 	if err != nil {
 		http.Error(w, "invalid PROPPATCH body", http.StatusBadRequest)
@@ -447,6 +450,8 @@ var livePropertyOrder = []propertyName{
 	{Namespace: davNamespace, Local: "getcontenttype"},
 	{Namespace: davNamespace, Local: "getetag"},
 	{Namespace: davNamespace, Local: "creationdate"},
+	{Namespace: davNamespace, Local: "supportedlock"},
+	{Namespace: davNamespace, Local: "lockdiscovery"},
 }
 
 func (s *Server) liveProperties(clean, target string, info interface {
@@ -471,6 +476,14 @@ func (s *Server) liveProperties(clean, target string, info interface {
 	add("displayname", name)
 	add("getlastmodified", info.ModTime().UTC().Format(http.TimeFormat))
 	add("creationdate", info.ModTime().UTC().Format(time.RFC3339))
+	if s.cfg.WebDAV.EnableLocking && s.store != nil {
+		locks, err := s.store.LocksForPath(clean)
+		if err != nil {
+			return nil, err
+		}
+		properties[propertyName{Namespace: davNamespace, Local: "supportedlock"}.key()] = davProperty{name: propertyName{Namespace: davNamespace, Local: "supportedlock"}, value: supportedLockValue(), raw: true}
+		properties[propertyName{Namespace: davNamespace, Local: "lockdiscovery"}.key()] = davProperty{name: propertyName{Namespace: davNamespace, Local: "lockdiscovery"}, value: lockDiscoveryValue(locks), raw: true}
+	}
 	if info.IsDir() {
 		add("getcontenttype", "httpd/unix-directory")
 		return properties, nil

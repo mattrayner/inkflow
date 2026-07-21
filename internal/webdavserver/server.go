@@ -105,6 +105,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handlePropfind(w, r)
 	case "PROPPATCH":
 		s.handleProppatch(w, r)
+	case "LOCK":
+		s.handleLock(w, r)
+	case "UNLOCK":
+		s.handleUnlock(w, r)
 	case "MKCOL":
 		s.handleMkcol(w, r, clean)
 	case http.MethodPut:
@@ -115,6 +119,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleGetOrHead(w, r)
+	case http.MethodDelete, "COPY", "MOVE":
+		if !s.cfg.WebDAV.EnableMutation {
+			s.methodNotAllowed(w)
+			return
+		}
+		s.handleMutation(w, r)
 	default:
 		s.methodNotAllowed(w)
 	}
@@ -126,10 +136,20 @@ func capabilityHeaders(cfg *config.Config) (allow, dav string) {
 		methods = append(methods, "GET", "HEAD")
 	}
 	if cfg != nil && cfg.WebDAV.EnableMutation {
-		methods = append(methods, "PROPPATCH")
+		methods = append(methods, "DELETE", "COPY", "MOVE", "PROPPATCH")
 	}
-	// This increment implements no locking methods, so it must never advertise
-	// DAV Class 2 even if its future-facing configuration flag is set.
+	if cfg != nil && cfg.WebDAV.EnableLocking {
+		methods = append(methods, "LOCK", "UNLOCK")
+	}
+	// RFC 4918 Class 1 requires DELETE, COPY, MOVE, and PROPPATCH. Do not
+	// advertise a DAV compliance class while mutation is disabled, even though
+	// the upload bridge still supports its baseline WebDAV methods.
+	if cfg == nil || !cfg.WebDAV.EnableMutation {
+		return strings.Join(methods, ", "), ""
+	}
+	if cfg.WebDAV.EnableLocking {
+		return strings.Join(methods, ", "), "1, 2"
+	}
 	return strings.Join(methods, ", "), "1"
 }
 
@@ -139,6 +159,10 @@ func (s *Server) setCapabilityHeaders(w http.ResponseWriter) {
 		allow, dav = capabilityHeaders(s.cfg)
 	}
 	w.Header().Set("Allow", allow)
+	if dav == "" {
+		w.Header().Del("DAV")
+		return
+	}
 	w.Header().Set("DAV", dav)
 }
 
@@ -170,6 +194,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, clean string) {
+	if !s.requireLocks(w, r, clean) {
+		return
+	}
 	route := s.routeLabel(clean)
 	if clean == "" {
 		s.metrics.Import(route, "rejected")

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -22,6 +23,7 @@ var (
 	hashIndexBucket      = []byte("hash_index")
 	failedIndexBucket    = []byte("failed_index")
 	deadPropertiesBucket = []byte("dead_properties")
+	locksBucket          = []byte("locks")
 )
 
 type Store struct {
@@ -40,6 +42,18 @@ type DeadProperty struct {
 type DeadPropertyChange struct {
 	DeadProperty
 	Remove bool
+}
+
+// LockRecord is a durable exclusive WebDAV write lock. ResourcePath is vault
+// relative, Depth is either "0" or "infinity", and Token uses the
+// opaquelocktoken URI scheme.
+type LockRecord struct {
+	Token        string    `json:"token"`
+	ResourcePath string    `json:"resource_path"`
+	Depth        string    `json:"depth"`
+	Owner        string    `json:"owner,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
 }
 
 type Record struct {
@@ -115,6 +129,12 @@ func Open(path string) (*Store, error) {
 		if _, err := tx.CreateBucketIfNotExists(deadPropertiesBucket); err != nil {
 			return err
 		}
+		if _, err := tx.CreateBucketIfNotExists(locksBucket); err != nil {
+			return err
+		}
+		if err := expireLocks(tx, time.Now().UTC()); err != nil {
+			return err
+		}
 		if !hashIndexMissing && !failedIndexMissing {
 			return nil
 		}
@@ -130,6 +150,201 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("init state db %s: %w", path, err)
 	}
 	return &Store{db: db}, nil
+}
+
+// CreateLock persists a lock unless it overlaps an active exclusive lock.
+// The boolean reports whether the lock was created.
+func (s *Store) CreateLock(lock LockRecord) (bool, error) {
+	created := false
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		if err := expireLocks(tx, time.Now().UTC()); err != nil {
+			return err
+		}
+		bucket := tx.Bucket(locksBucket)
+		if err := bucket.ForEach(func(_, value []byte) error {
+			var existing LockRecord
+			if err := json.Unmarshal(value, &existing); err != nil {
+				return err
+			}
+			if locksOverlap(existing, lock) {
+				return errLockConflict
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		data, err := json.Marshal(lock)
+		if err != nil {
+			return err
+		}
+		if err := bucket.Put([]byte(lock.Token), data); err != nil {
+			return err
+		}
+		created = true
+		return nil
+	})
+	if err == errLockConflict {
+		return false, nil
+	}
+	return created, err
+}
+
+// RefreshLock extends an exact resource lock identified by token.
+func (s *Store) RefreshLock(token, resourcePath string, expiresAt time.Time) (*LockRecord, error) {
+	var refreshed *LockRecord
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		if err := expireLocks(tx, time.Now().UTC()); err != nil {
+			return err
+		}
+		bucket := tx.Bucket(locksBucket)
+		value := bucket.Get([]byte(token))
+		if value == nil {
+			return nil
+		}
+		var lock LockRecord
+		if err := json.Unmarshal(value, &lock); err != nil {
+			return err
+		}
+		if lock.ResourcePath != resourcePath {
+			return nil
+		}
+		lock.ExpiresAt = expiresAt
+		data, err := json.Marshal(lock)
+		if err != nil {
+			return err
+		}
+		if err := bucket.Put([]byte(token), data); err != nil {
+			return err
+		}
+		refreshed = &lock
+		return nil
+	})
+	return refreshed, err
+}
+
+// Unlock removes the exact resource lock identified by token.
+func (s *Store) Unlock(token, resourcePath string) (bool, error) {
+	removed := false
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		if err := expireLocks(tx, time.Now().UTC()); err != nil {
+			return err
+		}
+		bucket := tx.Bucket(locksBucket)
+		value := bucket.Get([]byte(token))
+		if value == nil {
+			return nil
+		}
+		var lock LockRecord
+		if err := json.Unmarshal(value, &lock); err != nil {
+			return err
+		}
+		if lock.ResourcePath != resourcePath {
+			return nil
+		}
+		if err := bucket.Delete([]byte(token)); err != nil {
+			return err
+		}
+		removed = true
+		return nil
+	})
+	return removed, err
+}
+
+// LocksForPath returns active locks that cover resourcePath, expiring stale
+// records before reading them.
+func (s *Store) LocksForPath(resourcePath string) ([]LockRecord, error) {
+	var locks []LockRecord
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		if err := expireLocks(tx, time.Now().UTC()); err != nil {
+			return err
+		}
+		return tx.Bucket(locksBucket).ForEach(func(_, value []byte) error {
+			var lock LockRecord
+			if err := json.Unmarshal(value, &lock); err != nil {
+				return err
+			}
+			if lockCovers(lock, resourcePath) {
+				locks = append(locks, lock)
+			}
+			return nil
+		})
+	})
+	if locks == nil {
+		locks = []LockRecord{}
+	}
+	return locks, err
+}
+
+// LocksSatisfied reports whether every active lock covering any supplied path
+// is represented in tokens.
+func (s *Store) LocksSatisfied(paths []string, tokens map[string]struct{}) (bool, error) {
+	satisfied := true
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		if err := expireLocks(tx, time.Now().UTC()); err != nil {
+			return err
+		}
+		return tx.Bucket(locksBucket).ForEach(func(_, value []byte) error {
+			var lock LockRecord
+			if err := json.Unmarshal(value, &lock); err != nil {
+				return err
+			}
+			for _, resourcePath := range paths {
+				// A collection operation also modifies its descendants (for
+				// example DELETE or an overwrite MOVE), so it must supply tokens
+				// for locks directly held by those descendants as well.
+				if lockCovers(lock, resourcePath) || (resourcePath != "" && strings.HasPrefix(lock.ResourcePath, resourcePath+"/")) {
+					if _, ok := tokens[lock.Token]; !ok {
+						satisfied = false
+					}
+					break
+				}
+			}
+			return nil
+		})
+	})
+	return satisfied, err
+}
+
+var errLockConflict = fmt.Errorf("lock conflict")
+
+func expireLocks(tx *bbolt.Tx, now time.Time) error {
+	bucket := tx.Bucket(locksBucket)
+	var expired [][]byte
+	if err := bucket.ForEach(func(key, value []byte) error {
+		var lock LockRecord
+		if err := json.Unmarshal(value, &lock); err != nil {
+			return err
+		}
+		if !lock.ExpiresAt.After(now) {
+			expired = append(expired, append([]byte(nil), key...))
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, key := range expired {
+		if err := bucket.Delete(key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func lockCovers(lock LockRecord, resourcePath string) bool {
+	if lock.ResourcePath == resourcePath {
+		return true
+	}
+	if lock.Depth != "infinity" || resourcePath == "" {
+		return false
+	}
+	if lock.ResourcePath == "" {
+		return true
+	}
+	return strings.HasPrefix(resourcePath, lock.ResourcePath+"/")
+}
+
+func locksOverlap(first, second LockRecord) bool {
+	return lockCovers(first, second.ResourcePath) || lockCovers(second, first.ResourcePath)
 }
 
 func (s *Store) Close() error { return s.db.Close() }
