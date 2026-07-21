@@ -24,16 +24,47 @@ import (
 )
 
 type Importer struct {
-	cfg   *config.Config
-	store *state.Store
-	ai    ai.Provider
+	cfg                  *config.Config
+	store                *state.Store
+	ai                   ai.Provider
+	minReprocessInterval time.Duration
+	locks                *LockManager
+	files                fileSystem
+	writeNoteFn          func(plan.Result, string, string) error
+	saveRecordFn         func(string, *state.Record) error
 }
 
-func New(cfg *config.Config, store *state.Store, aiProvider ai.Provider) *Importer {
-	return &Importer{cfg: cfg, store: store, ai: aiProvider}
+// fileSystem is the deliberately small filesystem seam used by the import
+// commit path. Production uses osFileSystem; tests can fail a single write
+// while still exercising a real temporary vault.
+type fileSystem interface {
+	MkdirAll(string, os.FileMode) error
+	ReadFile(string) ([]byte, error)
+	WriteFile(string, []byte, os.FileMode) error
+	Remove(string) error
 }
+
+type osFileSystem struct{}
+
+func (osFileSystem) MkdirAll(path string, perm os.FileMode) error { return os.MkdirAll(path, perm) }
+func (osFileSystem) ReadFile(path string) ([]byte, error)         { return os.ReadFile(path) }
+func (osFileSystem) WriteFile(path string, data []byte, perm os.FileMode) error {
+	return os.WriteFile(path, data, perm)
+}
+func (osFileSystem) Remove(path string) error { return os.Remove(path) }
+
+func New(cfg *config.Config, store *state.Store, aiProvider ai.Provider, minReprocessInterval time.Duration, lockManagers ...*LockManager) *Importer {
+	locks := NewLockManager()
+	if len(lockManagers) > 0 && lockManagers[0] != nil {
+		locks = lockManagers[0]
+	}
+	return &Importer{cfg: cfg, store: store, ai: aiProvider, minReprocessInterval: minReprocessInterval, locks: locks, files: osFileSystem{}}
+}
+
+func (i *Importer) Locks() *LockManager { return i.locks }
 
 func (i *Importer) Import(ctx context.Context, input string, reader io.Reader, modTime time.Time) (*state.Record, error) {
+	slog.Default().Debug("import_started", "source", input)
 	if !strings.EqualFold(path.Ext(input), ".pdf") {
 		return nil, fmt.Errorf("not a pdf: %s", input)
 	}
@@ -48,44 +79,208 @@ func (i *Importer) Import(ctx context.Context, input string, reader io.Reader, m
 
 	t, err := plan.Build(i.cfg.Routes, i.cfg, input, modTime)
 	if err != nil {
+		slog.Default().Debug("route_not_matched", "source", input, "err", err)
 		return nil, err
 	}
-	existing, err := i.lookupRecord(input, sha)
+	unlock := i.locks.Lock(t.NoteRel)
+	defer unlock()
+	slog.Default().Debug("route_matched", "source", input, "pdf_rel", t.PDFRel, "note_rel", t.NoteRel, "template", t.Template, "ai", t.AI)
+	slog.Default().Debug("filename_parsed", "source", input, "date", t.Date.Format("2006-01-02"), "title", t.Title, "tags", t.Tags)
+	existing, hashMatch, err := i.lookupRecord(input, sha)
 	if err != nil {
 		return nil, err
 	}
-	// Dedup: if we already imported the exact same bytes into the same vault
-	// paths, there's nothing useful to redo — the PDF on disk is identical,
-	// the marker blocks already hold the previous AI output, and a re-run
-	// would only burn Gemini tokens and produce visible flicker. A route
-	// change (different PDFRel/NoteRel) bypasses dedup so files land in the
-	// new location.
-	if existing != nil && existing.VaultPDFPath == t.PDFRel && existing.VaultNotePath == t.NoteRel {
-		if existing.SHA256 == sha {
-			if existing.SourcePath == input && existing.ContentHash != "" {
-				return existing, nil
-			}
-			// Backfill legacy records and preserve exact-hash rename handling.
+	// Dedup: if we already imported the exact same bytes, there's nothing
+	// useful to redo — the PDF on disk is identical, the marker blocks
+	// already hold the previous AI output, and a re-run would only burn AI
+	// tokens and produce visible flicker.
+	samePathsCheck := existing != nil && existing.VaultPDFPath == t.PDFRel && existing.VaultNotePath == t.NoteRel
+	slog.Default().Debug("dedup_check", "source", input, "sha256", sha, "record_found", existing != nil, "hash_match", hashMatch, "same_paths", samePathsCheck)
+	if existing != nil && existing.SHA256 == sha {
+		samePaths := existing.VaultPDFPath == t.PDFRel && existing.VaultNotePath == t.NoteRel
+		if samePaths && existing.SourcePath == input && existing.ContentHash != "" {
+			slog.Default().Info("dedup_skipped", "source", input, "sha256", sha, "note", t.NoteRel, "pdf", t.PDFRel)
+			return existing, nil
+		}
+		if hashMatch {
+			// Content is byte-identical to a previously imported record found
+			// only via the hash index (rename and/or a route change moved the
+			// output paths). Relocate the existing PDF/note atomically instead
+			// of reprocessing.
+			return i.relocate(existing, input, modTime, t)
+		}
+		if samePaths {
+			// Backfill legacy records (missing ContentHash) that were found
+			// via source path with an exact-hash match and unchanged paths.
 			return i.refreshRecord(existing, input, modTime, sha, contentHash, int64(len(data)))
 		}
+	}
+	if existing != nil && existing.VaultPDFPath == t.PDFRel && existing.VaultNotePath == t.NoteRel {
 		// Only use the stable fingerprint for the same WebDAV source. A rename
 		// can change filename-derived title or tags even when the PDF is
 		// unchanged, so it must continue through the normal import path.
 		if existing.SourcePath == input && existing.ContentHash != "" && existing.ContentHash == contentHash {
 			return i.refreshRecord(existing, input, modTime, sha, contentHash, int64(len(data)))
 		}
+		// SHA and stable content hash both differ, but if AI previously
+		// succeeded recently and debouncing is enabled, this is likely a
+		// BOOX wrapper-only rewrite (same handwriting, new export metadata).
+		// Refresh the PDF and dedup identity but skip AI and leave the
+		// note's marker blocks as-is.
+		if t.AI && existing.AIStatus == state.AIStatusSuccess &&
+			i.minReprocessInterval > 0 &&
+			!existing.AILastSuccessAt.IsZero() &&
+			time.Since(existing.AILastSuccessAt) < i.minReprocessInterval {
+			return i.refreshWrapper(existing, input, modTime, sha, contentHash, t, data)
+		}
 	}
+	priorAIStatus := ""
+	elapsedSinceLastSuccess := any("n/a")
+	if existing != nil {
+		priorAIStatus = existing.AIStatus
+		if !existing.AILastSuccessAt.IsZero() {
+			elapsedSinceLastSuccess = time.Since(existing.AILastSuccessAt)
+		}
+	}
+	slog.Default().Debug("debounce_check", "ai_enabled", t.AI, "min_reprocess_interval", i.minReprocessInterval, "prior_ai_status", priorAIStatus, "elapsed_since_last_success", elapsedSinceLastSuccess)
 	return i.persist(ctx, existing, input, modTime, sha, contentHash, t, data)
 }
 
-func (i *Importer) lookupRecord(sourcePath, sha string) (*state.Record, error) {
-	if old, err := i.store.GetBySourcePath(sourcePath); err != nil {
+// refreshWrapper handles a likely BOOX wrapper-only PDF rewrite: full SHA256
+// changed but the same route/output paths and a recent AI success mean we
+// treat the content as unchanged. It refreshes the on-disk PDF to the newly
+// uploaded bytes and advances the dedup identity (SHA/content hash/mod
+// time/size), but does NOT call the AI provider and does NOT touch the
+// note's marker blocks — the prior AI output stands untouched.
+func (i *Importer) refreshWrapper(existing *state.Record, sourcePath string, modTime time.Time, sha, contentHash string, t plan.Result, data []byte) (*state.Record, error) {
+	pdfAbs := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(t.PDFRel))
+	if err := i.files.MkdirAll(filepath.Dir(pdfAbs), 0o755); err != nil {
 		return nil, err
+	}
+	if err := i.files.WriteFile(pdfAbs, data, 0o644); err != nil {
+		return nil, err
+	}
+	existing.SHA256 = sha
+	existing.ContentHash = contentHash
+	existing.SourceModTime = modTime
+	existing.SourceSize = int64(len(data))
+	existing.ImportedAt = time.Now().UTC()
+	// AIStatus/AIRetryCount/AILastError/AILastRetryAt/AILastSuccessAt intentionally
+	// left untouched — the previous AI result remains valid and current.
+	if err := i.store.Put(existing); err != nil {
+		return nil, err
+	}
+	slog.Default().Info("ai_skipped", "source", sourcePath, "sha256", sha, "reason", "debounced_wrapper_rewrite")
+	logImported(sourcePath, t.NoteRel, t.PDFRel)
+	return existing, nil
+}
+
+// lookupRecord returns whether the record came from a hash match rather than
+// the source-path index. Hash matches are not rebound until their import
+// outcome has committed, so relocation failures leave state unchanged.
+func (i *Importer) lookupRecord(sourcePath, sha string) (*state.Record, bool, error) {
+	if old, err := i.store.GetBySourcePath(sourcePath); err != nil {
+		return nil, false, err
 	} else if old != nil {
-		return old, nil
+		return old, false, nil
 	}
 
-	return i.store.GetByHash(sha)
+	old, err := i.store.GetByHash(sha)
+	if err != nil || old == nil {
+		return old, false, err
+	}
+	return old, true, nil
+}
+
+// relocate preserves an existing hash-matched PDF/note pair exactly while
+// rebinding it to a newly rendered source and vault paths. It copies first and
+// removes old paths only after the state update succeeds, so a failed move
+// cannot discard the original artifacts.
+func (i *Importer) relocate(existing *state.Record, sourcePath string, modTime time.Time, t plan.Result) (*state.Record, error) {
+	oldPDF := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(existing.VaultPDFPath))
+	oldNote := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(existing.VaultNotePath))
+	newPDF := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(t.PDFRel))
+	newNote := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(t.NoteRel))
+
+	createdPDF, err := relocateFile(oldPDF, newPDF)
+	if err != nil {
+		return nil, fmt.Errorf("relocate PDF: %w", err)
+	}
+	createdNote, err := relocateFile(oldNote, newNote)
+	if err != nil {
+		if createdPDF {
+			_ = os.Remove(newPDF)
+		}
+		return nil, fmt.Errorf("relocate note: %w", err)
+	}
+
+	previousSourcePath := existing.SourcePath
+	updated := *existing
+	updated.SourcePath = sourcePath
+	updated.VaultPDFPath = t.PDFRel
+	updated.VaultNotePath = t.NoteRel
+	updated.SourceModTime = modTime
+	updated.ImportedAt = time.Now().UTC()
+	if info, err := os.Stat(newPDF); err != nil {
+		return nil, fmt.Errorf("relocate PDF stat: %w", err)
+	} else {
+		updated.SourceSize = info.Size()
+	}
+	if err := i.saveRecordOutput(previousSourcePath, &updated); err != nil {
+		if createdPDF {
+			_ = os.Remove(newPDF)
+		}
+		if createdNote {
+			_ = os.Remove(newNote)
+		}
+		return nil, err
+	}
+	if oldPDF != newPDF {
+		_ = os.Remove(oldPDF)
+	}
+	if oldNote != newNote {
+		_ = os.Remove(oldNote)
+	}
+	*existing = updated
+	logImported(sourcePath, t.NoteRel, t.PDFRel)
+	return existing, nil
+}
+
+// relocateFile copies to a non-existent destination. Its boolean result says
+// whether this invocation created a destination that may be cleaned up on a
+// later failure.
+func relocateFile(source, destination string) (bool, error) {
+	if source == destination {
+		if _, err := os.Stat(source); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	input, err := os.Open(source)
+	if err != nil {
+		return false, err
+	}
+	defer input.Close()
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return false, err
+	}
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return false, fmt.Errorf("destination already exists: %s", destination)
+		}
+		return false, err
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		_ = output.Close()
+		_ = os.Remove(destination)
+		return false, err
+	}
+	if err := output.Close(); err != nil {
+		_ = os.Remove(destination)
+		return false, err
+	}
+	return true, nil
 }
 
 func (i *Importer) refreshRecord(existing *state.Record, sourcePath string, modTime time.Time, sha, contentHash string, size int64) (*state.Record, error) {
@@ -103,17 +298,7 @@ func (i *Importer) refreshRecord(existing *state.Record, sourcePath string, modT
 }
 
 func (i *Importer) persist(ctx context.Context, existing *state.Record, sourcePath string, modTime time.Time, sha, contentHash string, t plan.Result, pdfData []byte) (*state.Record, error) {
-	pdfAbs := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(t.PDFRel))
-	noteAbs := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(t.NoteRel))
-	if err := os.MkdirAll(filepath.Dir(pdfAbs), 0o755); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepath.Dir(noteAbs), 0o755); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(pdfAbs, pdfData, 0o644); err != nil {
-		return nil, err
-	}
+	_ = ctx // AI processing is performed by the asynchronous worker.
 	rec := &state.Record{
 		SourcePath:    sourcePath,
 		SHA256:        sha,
@@ -125,62 +310,116 @@ func (i *Importer) persist(ctx context.Context, existing *state.Record, sourcePa
 		ImportedAt:    time.Now().UTC(),
 	}
 	previousSourcePath := ""
-	previousPDFPath := ""
-	previousNotePath := ""
+	previousPDFPath, previousNotePath := "", ""
 	if existing != nil {
 		previousSourcePath = existing.SourcePath
-		previousPDFPath = existing.VaultPDFPath
-		previousNotePath = existing.VaultNotePath
-		*existing = *rec
-		rec = existing
+		previousPDFPath = filepath.Join(i.cfg.VaultDir, filepath.FromSlash(existing.VaultPDFPath))
+		previousNotePath = filepath.Join(i.cfg.VaultDir, filepath.FromSlash(existing.VaultNotePath))
+		// Retry history describes this source record's lifecycle and deliberately
+		// survives replacement with the newly imported metadata.
+		rec.AIRetryCount = existing.AIRetryCount
+		rec.AILastSuccessAt = existing.AILastSuccessAt
 	}
 
 	var summaryBody, ocrBody string
-	if t.AI && i.ai != nil {
-		res, err := i.ai.Process(ctx, bytes.NewReader(pdfData))
-		if err != nil {
-			msg := fmt.Sprintf("_AI failed: %s_", err.Error())
-			summaryBody, ocrBody = msg, msg
-			rec.AIStatus = state.AIStatusFailed
-			rec.AIRetryCount++
-			rec.AILastError = err.Error()
-			rec.AILastRetryAt = time.Now().UTC()
-		} else {
-			if res.OCR != "" {
-				ocrBody = res.OCR
-			} else {
-				ocrBody = "_AI returned no transcription._"
-			}
-			if len(res.Summary) > 0 {
-				summaryBody = "- " + strings.Join(res.Summary, "\n- ")
-			} else {
-				summaryBody = "_AI returned no summary._"
-			}
-			rec.AIStatus = state.AIStatusSuccess
-			rec.AIRetryCount++
-			rec.AILastError = ""
-			rec.AILastRetryAt = time.Now().UTC()
-		}
+	if t.AI {
+		// AI work is durable and intentionally deferred to retry.Scheduler.
+		slog.Default().Debug("ai_queued", "source", sourcePath, "route_ai_enabled", true)
+		summaryBody, ocrBody = "_AI processing queued._", "_AI processing queued._"
+		rec.AIStatus = state.AIStatusPending
+		rec.AIRetryCount = 0
+		rec.AILastError = ""
+		rec.AILastRetryAt = time.Time{}
+	} else {
+		slog.Default().Debug("ai_skipped", "source", sourcePath, "reason", "route_ai_disabled")
+		rec.AIStatus = state.AIStatusSuccess
 	}
 
-	if err := i.writeNote(t, summaryBody, ocrBody); err != nil {
-		removeIfDistinct(previousPDFPath, pdfAbs)
-		removeIfDistinct(previousNotePath, noteAbs)
+	if err := i.commitImport(previousSourcePath, previousPDFPath, previousNotePath, rec, t, pdfData, summaryBody, ocrBody); err != nil {
 		return nil, err
 	}
-	if err := i.saveRecord(previousSourcePath, rec); err != nil {
-		removeIfDistinct(previousPDFPath, pdfAbs)
-		removeIfDistinct(previousNotePath, noteAbs)
-		return nil, err
+	if existing != nil {
+		*existing = *rec
+		rec = existing
 	}
-	if previousPDFPath != "" && previousPDFPath != rec.VaultPDFPath {
-		_ = os.Remove(filepath.Join(i.cfg.VaultDir, filepath.FromSlash(previousPDFPath)))
-	}
-	if previousNotePath != "" && previousNotePath != rec.VaultNotePath {
-		_ = os.Remove(filepath.Join(i.cfg.VaultDir, filepath.FromSlash(previousNotePath)))
-	}
-	logImported(sourcePath, t.NoteRel, t.PDFRel)
 	return rec, nil
+}
+
+// commitImport owns the filesystem/state commit boundary. It snapshots target
+// files before replacing them so a later note or state failure restores the
+// previous same-path import rather than merely leaving replacement bytes.
+func (i *Importer) commitImport(previousSourcePath, previousPDFPath, previousNotePath string, rec *state.Record, t plan.Result, pdfData []byte, summaryBody, ocrBody string) error {
+	pdfAbs := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(t.PDFRel))
+	noteAbs := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(t.NoteRel))
+	outputs, err := i.snapshotOutputs(pdfAbs, noteAbs)
+	if err != nil {
+		return err
+	}
+	rollback := func() { i.restoreOutputs(outputs) }
+	if err := i.files.MkdirAll(filepath.Dir(pdfAbs), 0o755); err != nil {
+		return err
+	}
+	if err := i.files.MkdirAll(filepath.Dir(noteAbs), 0o755); err != nil {
+		return err
+	}
+	if err := i.files.WriteFile(pdfAbs, pdfData, 0o644); err != nil {
+		rollback()
+		return err
+	}
+	slog.Default().Debug("pdf_written", "path", pdfAbs, "bytes", len(pdfData))
+	if err := i.writeNoteOutput(t, summaryBody, ocrBody); err != nil {
+		rollback()
+		slog.Default().Error("note_write_failed", "source", rec.SourcePath, "note", t.NoteRel, "err", err)
+		return err
+	}
+	slog.Default().Debug("note_written", "note", noteAbs)
+	if err := i.saveRecordOutput(previousSourcePath, rec); err != nil {
+		rollback()
+		slog.Default().Error("state_save_failed", "source", rec.SourcePath, "sha256", rec.SHA256, "err", err)
+		return err
+	}
+	slog.Default().Debug("state_saved", "source", rec.SourcePath, "sha256", rec.SHA256)
+	if previousPDFPath != "" && previousPDFPath != pdfAbs {
+		_ = i.files.Remove(previousPDFPath)
+	}
+	if previousNotePath != "" && previousNotePath != noteAbs {
+		_ = i.files.Remove(previousNotePath)
+	}
+	logImported(rec.SourcePath, t.NoteRel, t.PDFRel)
+	return nil
+}
+
+type outputSnapshot struct {
+	path   string
+	data   []byte
+	exists bool
+}
+
+func (i *Importer) snapshotOutputs(paths ...string) ([]outputSnapshot, error) {
+	snapshots := make([]outputSnapshot, 0, len(paths))
+	for _, path := range paths {
+		data, err := i.files.ReadFile(path)
+		if err == nil {
+			snapshots = append(snapshots, outputSnapshot{path: path, data: data, exists: true})
+			continue
+		}
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+		snapshots = append(snapshots, outputSnapshot{path: path})
+	}
+	return snapshots, nil
+}
+
+func (i *Importer) restoreOutputs(snapshots []outputSnapshot) {
+	for _, snapshot := range snapshots {
+		if snapshot.exists {
+			_ = i.files.MkdirAll(filepath.Dir(snapshot.path), 0o755)
+			_ = i.files.WriteFile(snapshot.path, snapshot.data, 0o644)
+			continue
+		}
+		_ = i.files.Remove(snapshot.path)
+	}
 }
 
 func (i *Importer) saveRecord(previousSourcePath string, rec *state.Record) error {
@@ -190,17 +429,32 @@ func (i *Importer) saveRecord(previousSourcePath string, rec *state.Record) erro
 	return i.store.Save(previousSourcePath, rec)
 }
 
+func (i *Importer) saveRecordOutput(previousSourcePath string, rec *state.Record) error {
+	if i.saveRecordFn != nil {
+		return i.saveRecordFn(previousSourcePath, rec)
+	}
+	return i.saveRecord(previousSourcePath, rec)
+}
+
+func (i *Importer) writeNoteOutput(t plan.Result, summaryBody, ocrBody string) error {
+	if i.writeNoteFn != nil {
+		return i.writeNoteFn(t, summaryBody, ocrBody)
+	}
+	return i.writeNote(t, summaryBody, ocrBody)
+}
+
 func (i *Importer) writeNote(t plan.Result, summaryBody, ocrBody string) error {
 	noteAbs := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(t.NoteRel))
-	if err := os.MkdirAll(filepath.Dir(noteAbs), 0o755); err != nil {
+	if err := i.files.MkdirAll(filepath.Dir(noteAbs), 0o755); err != nil {
 		return err
 	}
 	var content string
-	if existing, err := os.ReadFile(noteAbs); err == nil {
-		content = frontmatter.UpdateTags(string(existing), t.Tags)
+	if existing, err := i.files.ReadFile(noteAbs); err == nil {
+		content = frontmatter.UpdateTagsWithStrategy(string(existing), t.Tags, t.TagMergeStrategy)
 	} else if !os.IsNotExist(err) {
 		return err
 	} else {
+		slog.Default().Debug("template_render_start", "template_dir", i.cfg.TemplateDir, "template", t.Template)
 		body, err := plan.RenderNoteBody(i.cfg.TemplateDir, plan.NoteData{
 			Date:       t.Date.Format("2006-01-02"),
 			Title:      t.Title,
@@ -211,22 +465,18 @@ func (i *Importer) writeNote(t plan.Result, summaryBody, ocrBody string) error {
 		if err != nil {
 			return err
 		}
+		slog.Default().Debug("template_rendered", "template", t.Template, "bytes", len(body))
 		content = body
 	}
-	content = note.UpsertMarkerBlock(content, "Summary", "summary", summaryBody)
-	content = note.UpsertMarkerBlock(content, "OCR", "ocr", ocrBody)
-	return os.WriteFile(noteAbs, []byte(content), 0o644)
-}
-
-func removeIfDistinct(oldPath, newPath string) {
-	if oldPath == "" || oldPath != newPath {
-		_ = os.Remove(newPath)
-	}
+	preserveFailure := t.PreserveMarkerOnAIFailure && strings.HasPrefix(summaryBody, "_AI failed:")
+	content = note.UpsertMarkerBlockWithFailurePolicy(content, "Summary", "summary", summaryBody, preserveFailure)
+	content = note.UpsertMarkerBlockWithFailurePolicy(content, "OCR", "ocr", ocrBody, preserveFailure)
+	return i.files.WriteFile(noteAbs, []byte(content), 0o644)
 }
 
 func logImported(sourcePath, notePath, pdfPath string) {
 	if logger := slog.Default(); logger != nil {
-		logger.Info("imported", "source", sourcePath, "note", notePath, "pdf", pdfPath)
+		logger.Info("import_completed", "source", sourcePath, "note", notePath, "pdf", pdfPath)
 	}
 }
 
@@ -241,7 +491,7 @@ func (i *Importer) RetryAI(ctx context.Context, rec state.Record) error {
 	}
 
 	pdfAbs := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(rec.VaultPDFPath))
-	pdfData, err := os.ReadFile(pdfAbs)
+	pdfData, err := i.files.ReadFile(pdfAbs)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("retry AI: vault PDF not found: %s", pdfAbs)
@@ -249,31 +499,24 @@ func (i *Importer) RetryAI(ctx context.Context, rec state.Record) error {
 		return fmt.Errorf("retry AI: read vault PDF: %w", err)
 	}
 
+	slog.Default().Debug("ai_call_start", "source", rec.SourcePath)
 	res, err := i.ai.Process(ctx, bytes.NewReader(pdfData))
 	if err != nil {
+		slog.Default().Debug("ai_call_failed", "source", rec.SourcePath, "err", err)
 		return err
 	}
+	slog.Default().Debug("ai_call_success", "source", rec.SourcePath, "ocr_len", len(res.OCR), "summary_bullets", len(res.Summary))
 
-	var summaryBody, ocrBody string
-	if res.OCR != "" {
-		ocrBody = res.OCR
-	} else {
-		ocrBody = "_AI returned no transcription._"
-	}
-	if len(res.Summary) > 0 {
-		summaryBody = "- " + strings.Join(res.Summary, "\n- ")
-	} else {
-		summaryBody = "_AI returned no summary._"
-	}
+	summaryBody, ocrBody := renderBodies(res)
 
 	noteAbs := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(rec.VaultNotePath))
-	existing, err := os.ReadFile(noteAbs)
+	existing, err := i.files.ReadFile(noteAbs)
 	if err != nil {
 		return fmt.Errorf("retry AI: read vault note: %w", err)
 	}
 	content := note.UpsertMarkerBlock(string(existing), "Summary", "summary", summaryBody)
 	content = note.UpsertMarkerBlock(content, "OCR", "ocr", ocrBody)
-	if err := os.WriteFile(noteAbs, []byte(content), 0o644); err != nil {
+	if err := i.files.WriteFile(noteAbs, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("retry AI: write vault note: %w", err)
 	}
 
@@ -281,6 +524,7 @@ func (i *Importer) RetryAI(ctx context.Context, rec state.Record) error {
 	rec.AIRetryCount++
 	rec.AILastError = ""
 	rec.AILastRetryAt = time.Now().UTC()
+	rec.AILastSuccessAt = time.Now().UTC()
 	if err := i.store.Put(&rec); err != nil {
 		return fmt.Errorf("retry AI: save record: %w", err)
 	}
@@ -293,11 +537,27 @@ func (i *Importer) RetryAI(ctx context.Context, rec state.Record) error {
 // scheduler when retries are exhausted or a non-retryable error occurs.
 func (i *Importer) WriteNoteError(rec state.Record, msg string) error {
 	noteAbs := filepath.Join(i.cfg.VaultDir, filepath.FromSlash(rec.VaultNotePath))
-	existing, err := os.ReadFile(noteAbs)
+	existing, err := i.files.ReadFile(noteAbs)
 	if err != nil {
 		return fmt.Errorf("write note error: read %s: %w", noteAbs, err)
 	}
-	content := note.UpsertMarkerBlock(string(existing), "Summary", "summary", msg)
-	content = note.UpsertMarkerBlock(content, "OCR", "ocr", msg)
-	return os.WriteFile(noteAbs, []byte(content), 0o644)
+	preserveFailure := true
+	if t, err := plan.Build(i.cfg.Routes, i.cfg, rec.SourcePath, rec.SourceModTime); err == nil {
+		preserveFailure = t.PreserveMarkerOnAIFailure
+	}
+	content := note.UpsertMarkerBlockWithFailurePolicy(string(existing), "Summary", "summary", msg, preserveFailure)
+	content = note.UpsertMarkerBlockWithFailurePolicy(content, "OCR", "ocr", msg, preserveFailure)
+	return i.files.WriteFile(noteAbs, []byte(content), 0o644)
+}
+
+// renderBodies renders successful AI output consistently for every caller.
+func renderBodies(res ai.Result) (summaryBody, ocrBody string) {
+	ocrBody = res.OCR
+	if ocrBody == "" {
+		ocrBody = "_AI returned no transcription._"
+	}
+	if len(res.Summary) == 0 {
+		return "_AI returned no summary._", ocrBody
+	}
+	return "- " + strings.Join(res.Summary, "\n- "), ocrBody
 }

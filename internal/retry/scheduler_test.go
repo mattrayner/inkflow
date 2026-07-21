@@ -2,12 +2,13 @@ package retry
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"inkflow/internal/ai/gemini"
+	"inkflow/internal/ai"
 	"inkflow/internal/config"
 	"inkflow/internal/state"
 )
@@ -74,6 +75,57 @@ func failedRec(sourcePath string) state.Record {
 		AIRetryCount:  0,
 		AILastError:   "gemini 503: service unavailable",
 		AILastRetryAt: time.Now().UTC().Add(-time.Hour), // definitely elapsed
+	}
+}
+
+func pendingRec(sourcePath string) state.Record {
+	rec := failedRec(sourcePath)
+	rec.AIStatus = state.AIStatusPending
+	rec.AILastRetryAt = time.Time{}
+	return rec
+}
+
+func TestRunOnceProcessesPendingRecordWhenRetriesDisabled(t *testing.T) {
+	store := openTestStore(t)
+	rec := pendingRec("Syncs/pending.pdf")
+	if err := store.Put(&rec); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultCfg()
+	cfg.Enabled = false
+	mock := &mockRetrier{store: store}
+	s := NewScheduler(store, mock, cfg)
+	s.runOnce(context.Background())
+	if mock.retryCalls != 1 {
+		t.Fatalf("RetryAI calls = %d, want 1", mock.retryCalls)
+	}
+	got, err := store.GetBySourcePath(rec.SourcePath)
+	if err != nil || got == nil || got.AIStatus != state.AIStatusSuccess {
+		t.Fatalf("pending record not completed: record=%+v err=%v", got, err)
+	}
+}
+
+func TestProcessRecordDoesNotOverwriteNewerImport(t *testing.T) {
+	store := openTestStore(t)
+	stale := failedRec("Syncs/race.pdf")
+	if err := store.Put(&stale); err != nil {
+		t.Fatal(err)
+	}
+	newer := stale
+	newer.SHA256 = "newer"
+	newer.AIStatus = state.AIStatusPending
+	if err := store.Put(&newer); err != nil {
+		t.Fatal(err)
+	}
+	mock := &mockRetrier{store: store}
+	s := NewScheduler(store, mock, defaultCfg())
+	s.processRecord(context.Background(), stale)
+	if mock.retryCalls != 0 {
+		t.Fatalf("RetryAI calls = %d, want 0 for stale snapshot", mock.retryCalls)
+	}
+	got, err := store.GetBySourcePath(newer.SourcePath)
+	if err != nil || got == nil || got.SHA256 != "newer" || got.AIStatus != state.AIStatusPending {
+		t.Fatalf("newer record overwritten: record=%+v err=%v", got, err)
 	}
 }
 
@@ -163,7 +215,7 @@ func TestRunOnceNonRetryableExhaustsImmediately(t *testing.T) {
 	}
 
 	// 401 is non-retryable.
-	nonRetryableErr := &gemini.APIError{StatusCode: 401, Message: "API key invalid"}
+	nonRetryableErr := fmt.Errorf("retry import: %w", &ai.APIError{StatusCode: 401, Message: "API key invalid"})
 	mock := &mockRetrier{retryResult: nonRetryableErr}
 	cfg := config.RetryConfig{
 		Enabled:         true,
@@ -215,7 +267,7 @@ func TestExhaustedRetryMessageIncludesAttemptCount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	retryableErr := &gemini.APIError{StatusCode: 503, Message: "service unavailable"}
+	retryableErr := &ai.APIError{StatusCode: 503, Message: "service unavailable"}
 	mock := &mockRetrier{retryResult: retryableErr}
 	cfg := config.RetryConfig{
 		Enabled:         true,
@@ -282,7 +334,7 @@ func TestRunOnceSuccessfulRetryWritesSuccessToRecord(t *testing.T) {
 	}
 }
 
-// ----- Test: retryable failure below max increments count, does NOT write note -----
+// ----- Test: retryable failure below max increments count and writes outcome -----
 
 func TestRunOnceRetryableFailureBelowMaxIncrementsOnly(t *testing.T) {
 	store := openTestStore(t)
@@ -292,7 +344,7 @@ func TestRunOnceRetryableFailureBelowMaxIncrementsOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	retryableErr := &gemini.APIError{StatusCode: 503, Message: "service unavailable"}
+	retryableErr := &ai.APIError{StatusCode: 503, Message: "service unavailable"}
 	mock := &mockRetrier{retryResult: retryableErr}
 	cfg := config.RetryConfig{
 		Enabled:         true,
@@ -303,9 +355,8 @@ func TestRunOnceRetryableFailureBelowMaxIncrementsOnly(t *testing.T) {
 	s := NewScheduler(store, mock, cfg)
 	s.runOnce(context.Background())
 
-	// No note error written.
-	if len(mock.writtenMsgs) != 0 {
-		t.Errorf("WriteNoteError called unexpectedly: %v", mock.writtenMsgs)
+	if len(mock.writtenMsgs) != 1 {
+		t.Errorf("WriteNoteError calls = %d, want 1", len(mock.writtenMsgs))
 	}
 	// Record incremented.
 	got, err := store.GetBySourcePath("Syncs/transient.pdf")
