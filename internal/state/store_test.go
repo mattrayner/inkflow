@@ -262,6 +262,56 @@ func TestDeadPropertiesPersistAndApplyAtomically(t *testing.T) {
 	}
 }
 
+func TestLocksPersistAndExpiredLocksAreRemoved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	active := LockRecord{Token: "opaquelocktoken:active", ResourcePath: "docs", Depth: "infinity", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	expired := LockRecord{Token: "opaquelocktoken:expired", ResourcePath: "expired", Depth: "0", CreatedAt: now.Add(-time.Hour), ExpiresAt: now.Add(-time.Minute)}
+	for _, lock := range []LockRecord{active, expired} {
+		if created, err := s.CreateLock(lock); err != nil || !created {
+			t.Fatalf("CreateLock(%s) = %t, %v", lock.Token, created, err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	locks, err := s.LocksForPath("docs/child.txt")
+	if err != nil || len(locks) != 1 || locks[0].Token != active.Token {
+		t.Fatalf("reopened active locks = %#v, %v", locks, err)
+	}
+	locks, err = s.LocksForPath("expired")
+	if err != nil || len(locks) != 0 {
+		t.Fatalf("expired locks = %#v, %v", locks, err)
+	}
+	if satisfied, err := s.LocksSatisfied([]string{"docs/child.txt"}, map[string]struct{}{}); err != nil || satisfied {
+		t.Fatalf("missing token satisfied=%t err=%v", satisfied, err)
+	}
+	if satisfied, err := s.LocksSatisfied([]string{"docs/child.txt"}, map[string]struct{}{active.Token: {}}); err != nil || !satisfied {
+		t.Fatalf("active token satisfied=%t err=%v", satisfied, err)
+	}
+}
+
+func TestRootDepthInfinityLockCoversDescendants(t *testing.T) {
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	lock := LockRecord{Token: "opaquelocktoken:root", ResourcePath: "", Depth: "infinity", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if created, err := s.CreateLock(lock); err != nil || !created {
+		t.Fatalf("CreateLock(root) = %t, %v", created, err)
+	}
+	if satisfied, err := s.LocksSatisfied([]string{"other/file"}, map[string]struct{}{}); err != nil || satisfied {
+		t.Fatalf("root lock was not enforced: satisfied=%t err=%v", satisfied, err)
+	}
+}
+
 func assertIndexes(t *testing.T, s *Store, hashes map[string][]string, failed []string) {
 	t.Helper()
 	if err := s.db.View(func(tx *bbolt.Tx) error {

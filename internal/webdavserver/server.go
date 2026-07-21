@@ -105,6 +105,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handlePropfind(w, r)
 	case "PROPPATCH":
 		s.handleProppatch(w, r)
+	case "LOCK":
+		s.handleLock(w, r)
+	case "UNLOCK":
+		s.handleUnlock(w, r)
 	case "MKCOL":
 		s.handleMkcol(w, r, clean)
 	case http.MethodPut:
@@ -134,8 +138,10 @@ func capabilityHeaders(cfg *config.Config) (allow, dav string) {
 	if cfg != nil && cfg.WebDAV.EnableMutation {
 		methods = append(methods, "DELETE", "COPY", "MOVE", "PROPPATCH")
 	}
-	// This increment implements no locking methods, so it must never advertise
-	// DAV Class 2 even if its future-facing configuration flag is set.
+	if cfg != nil && cfg.WebDAV.EnableLocking {
+		methods = append(methods, "LOCK", "UNLOCK")
+		return strings.Join(methods, ", "), "1, 2"
+	}
 	return strings.Join(methods, ", "), "1"
 }
 
@@ -176,6 +182,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, clean string) {
+	if !s.requireLocks(w, r, clean) {
+		return
+	}
 	route := s.routeLabel(clean)
 	if clean == "" {
 		s.metrics.Import(route, "rejected")

@@ -341,8 +341,12 @@ func TestOptionsCapabilitiesReflectConfig(t *testing.T) {
 			srv := newServer(cfg, nil, nil, nil, nil)
 			rec := httptest.NewRecorder()
 			srv.ServeHTTP(rec, httptest.NewRequest(http.MethodOptions, "/", nil))
-			if got := rec.Header().Get("DAV"); got != "1" {
-				t.Fatalf("DAV = %q, want 1", got)
+			wantDAV := "1"
+			if cfg.WebDAV.EnableLocking {
+				wantDAV = "1, 2"
+			}
+			if got := rec.Header().Get("DAV"); got != wantDAV {
+				t.Fatalf("DAV = %q, want %q", got, wantDAV)
 			}
 			gotRetrieval := strings.Contains(rec.Header().Get("Allow"), "GET") && strings.Contains(rec.Header().Get("Allow"), "HEAD")
 			if gotRetrieval != cfg.WebDAV.EnableRetrieval {

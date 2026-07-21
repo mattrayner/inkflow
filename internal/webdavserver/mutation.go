@@ -41,6 +41,9 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot delete vault root", http.StatusForbidden)
 		return
 	}
+	if !s.requireLocks(w, r, clean) {
+		return
+	}
 
 	if failures := deleteResource(clean, target, info); len(failures) != 0 {
 		writeMutationFailures(w, failures)
@@ -58,6 +61,9 @@ func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request) {
 	destinationClean, destinationTarget, destinationInfo, err := s.resolveDestination(r)
 	if err != nil {
 		writeDestinationError(w, err)
+		return
+	}
+	if !s.requireLocks(w, r, destinationClean) {
 		return
 	}
 	if sourceClean == "" || destinationClean == "" || pathsOverlap(sourceClean, destinationClean) {
@@ -110,6 +116,9 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	destinationClean, destinationTarget, destinationInfo, err := s.resolveDestination(r)
 	if err != nil {
 		writeDestinationError(w, err)
+		return
+	}
+	if !s.requireLocks(w, r, sourceClean, destinationClean) {
 		return
 	}
 	if sourceClean == "" || destinationClean == "" || pathsOverlap(sourceClean, destinationClean) {
