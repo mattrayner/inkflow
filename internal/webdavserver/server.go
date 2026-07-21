@@ -6,13 +6,16 @@ import (
 	"crypto/subtle"
 	"encoding/xml"
 	"errors"
+	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,11 +29,14 @@ const shutdownTimeout = 10 * time.Second
 const defaultMaxUploadBytes int64 = 100 * 1024 * 1024
 
 type Server struct {
-	cfg     *config.Config
-	imp     *importer.Importer
-	store   *state.Store
-	metrics *observability.Metrics
-	logger  *slog.Logger
+	cfg      *config.Config
+	imp      *importer.Importer
+	store    *state.Store
+	metrics  *observability.Metrics
+	logger   *slog.Logger
+	resolver vaultResolver
+	allow    string
+	dav      string
 }
 
 func Serve(ctx context.Context, cfg *config.Config, imp *importer.Importer, store *state.Store, metrics *observability.Metrics, logger *slog.Logger) error {
@@ -40,7 +46,7 @@ func Serve(ctx context.Context, cfg *config.Config, imp *importer.Importer, stor
 	if cfg.WebDAVPass == "" {
 		cfg.WebDAVPass = os.Getenv("WEBDAV_PASS")
 	}
-	srv := &Server{cfg: cfg, imp: imp, store: store, metrics: metrics, logger: logger}
+	srv := newServer(cfg, imp, store, metrics, logger)
 	if cfg.WebDAVUser == "" && cfg.WebDAVPass == "" && !isLoopbackListenAddr(cfg.ListenAddr) {
 		srv.warn("UNSAFE WEBDAV CONFIGURATION: unauthenticated plaintext vault writes are reachable on a non-loopback address; configure credentials and use TLS via a reverse proxy", "listen_addr", cfg.ListenAddr)
 	}
@@ -56,6 +62,20 @@ func Serve(ctx context.Context, cfg *config.Config, imp *importer.Importer, stor
 		return err
 	}
 	return nil
+}
+
+func newServer(cfg *config.Config, imp *importer.Importer, store *state.Store, metrics *observability.Metrics, logger *slog.Logger) *Server {
+	allow, dav := capabilityHeaders(cfg)
+	return &Server{
+		cfg:      cfg,
+		imp:      imp,
+		store:    store,
+		metrics:  metrics,
+		logger:   logger,
+		resolver: newVaultResolver(cfg.VaultDir),
+		allow:    allow,
+		dav:      dav,
+	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -79,8 +99,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.info("webdav request", "method", r.Method, "path", clean, "depth", r.Header.Get("Depth"))
 	switch r.Method {
 	case http.MethodOptions:
-		w.Header().Set("Allow", "OPTIONS, PROPFIND, MKCOL, PUT")
-		w.Header().Set("DAV", "1,2")
+		s.setCapabilityHeaders(w)
 		w.WriteHeader(http.StatusNoContent)
 	case "PROPFIND":
 		s.handlePropfind(w, r)
@@ -88,10 +107,39 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleMkcol(w, r, clean)
 	case http.MethodPut:
 		s.handlePut(w, r, clean)
+	case http.MethodGet, http.MethodHead:
+		if !s.cfg.WebDAV.EnableRetrieval {
+			s.methodNotAllowed(w)
+			return
+		}
+		s.handleGetOrHead(w, r)
 	default:
-		w.Header().Set("Allow", "OPTIONS, PROPFIND, MKCOL, PUT")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		s.methodNotAllowed(w)
 	}
+}
+
+func capabilityHeaders(cfg *config.Config) (allow, dav string) {
+	methods := []string{"OPTIONS", "PROPFIND", "MKCOL", "PUT"}
+	if cfg != nil && cfg.WebDAV.EnableRetrieval {
+		methods = append(methods, "GET", "HEAD")
+	}
+	// This increment implements no locking methods, so it must never advertise
+	// DAV Class 2 even if its future-facing configuration flag is set.
+	return strings.Join(methods, ", "), "1"
+}
+
+func (s *Server) setCapabilityHeaders(w http.ResponseWriter) {
+	allow, dav := s.allow, s.dav
+	if allow == "" { // Supports package-local test servers constructed as literals.
+		allow, dav = capabilityHeaders(s.cfg)
+	}
+	w.Header().Set("Allow", allow)
+	w.Header().Set("DAV", dav)
+}
+
+func (s *Server) methodNotAllowed(w http.ResponseWriter) {
+	s.setCapabilityHeaders(w)
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
@@ -156,6 +204,81 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, clean string)
 	}
 	s.info("webdav imported", "path", clean, "note", rec.VaultNotePath, "pdf", rec.VaultPDFPath)
 	w.WriteHeader(http.StatusCreated)
+}
+
+func (s *Server) handleGetOrHead(w http.ResponseWriter, r *http.Request) {
+	clean, target, info, err := s.resolveVaultPath(r.URL.EscapedPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
+	if info.IsDir() {
+		w.Header().Set("Content-Type", "httpd/unix-directory")
+		w.Header().Set("Content-Length", "0")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	etag, err := s.etag(clean, target)
+	if err != nil {
+		s.error("compute ETag", "path", clean, "err", err)
+		http.Error(w, "unable to read resource", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(target)))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	if notModified(r, etag, info.ModTime()) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	file, err := os.Open(target)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "unable to read resource", http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, file)
+}
+
+func notModified(r *http.Request, etag string, modTime time.Time) bool {
+	if values, ok := r.Header["If-None-Match"]; ok {
+		for _, value := range values {
+			for _, candidate := range strings.Split(value, ",") {
+				candidate = strings.TrimSpace(candidate)
+				if candidate == "*" || strings.TrimPrefix(candidate, "W/") == etag {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if modifiedSince := r.Header.Get("If-Modified-Since"); modifiedSince != "" {
+		if since, err := http.ParseTime(modifiedSince); err == nil {
+			return !modTime.UTC().Truncate(time.Second).After(since)
+		}
+	}
+	return false
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter) {
@@ -303,84 +426,19 @@ func (s *Server) responseFor(clean string, info os.FileInfo) propResponse {
 	return propResponse{Href: href, Propstat: propstat{Prop: prop, Status: "HTTP/1.1 200 OK"}}
 }
 
-// resolveVaultPath decodes and validates a request target before it ever
-// reaches the filesystem. Existing symlinks are deliberately rejected: DAV
-// browsing must not expose a target outside the configured vault.
 func (s *Server) resolveVaultPath(rawPath string) (string, string, os.FileInfo, error) {
-	return s.resolveVaultTarget(rawPath, false)
+	return s.pathResolver().resolve(rawPath)
 }
 
-// resolveVaultPathForCreate validates a requested collection path while
-// allowing only its final component to be absent.
 func (s *Server) resolveVaultPathForCreate(rawPath string) (string, string, os.FileInfo, error) {
-	return s.resolveVaultTarget(rawPath, true)
+	return s.pathResolver().resolveForCreate(rawPath)
 }
 
-func (s *Server) resolveVaultTarget(rawPath string, allowFinalMissing bool) (string, string, os.FileInfo, error) {
-	decoded, err := url.PathUnescape(rawPath)
-	if err != nil {
-		return "", "", nil, err
+func (s *Server) pathResolver() vaultResolver {
+	if s.resolver.vaultDir != "" {
+		return s.resolver
 	}
-	if strings.Contains(decoded, "\\") {
-		return "", "", nil, errors.New("backslash path separator")
-	}
-	for _, part := range strings.Split(decoded, "/") {
-		if part == ".." {
-			return "", "", nil, errors.New("path traversal")
-		}
-	}
-	clean := cleanPath(decoded)
-	root, err := filepath.Abs(s.cfg.VaultDir)
-	if err != nil {
-		return "", "", nil, err
-	}
-	root, err = filepath.EvalSymlinks(root)
-	if err != nil {
-		return "", "", nil, err
-	}
-	target := root
-	components := strings.Split(clean, "/")
-	for index, component := range components {
-		if component == "" {
-			continue
-		}
-		target = filepath.Join(target, component)
-		info, err := os.Lstat(target)
-		if err != nil {
-			if allowFinalMissing && os.IsNotExist(err) && index == len(components)-1 {
-				return clean, target, nil, nil
-			}
-			return "", "", nil, err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return "", "", nil, errors.New("symlink target")
-		}
-	}
-	rel, err := filepath.Rel(root, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", "", nil, errors.New("path outside vault")
-	}
-	lstat, err := os.Lstat(target)
-	if err != nil {
-		return "", "", nil, err
-	}
-	if lstat.Mode()&os.ModeSymlink != 0 {
-		return "", "", nil, errors.New("symlink target")
-	}
-	return clean, target, lstat, nil
-}
-
-func cleanPath(p string) string {
-	p = strings.TrimSpace(p)
-	if p == "" || p == "/" {
-		return ""
-	}
-	p = path.Clean("/" + p)
-	p = strings.TrimPrefix(p, "/")
-	if p == "." {
-		return ""
-	}
-	return p
+	return newVaultResolver(s.cfg.VaultDir)
 }
 
 func escapeHref(href string) string {

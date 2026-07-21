@@ -25,6 +25,12 @@ Verbose logging: `SLOG_LEVEL=debug go run ./cmd/inkflow --config inkflow.toml se
 
 Required: `vault_dir`. Every route must have `from`. Missing either causes startup error.
 
+`[webdav].enable_retrieval` defaults to `true` and permits authenticated
+`GET`/`HEAD` retrieval from the vault. `enable_mutation` and `enable_locking`
+default to `false`; they are reserved capability gates until their handlers are
+implemented. The server advertises `DAV: 1` and must not advertise `DAV: 2`
+without locking support.
+
 Filename pattern placeholders: `{date}` (YYYY-MM-DD), `{stem}` (basename without ext), `{slug}` (URL-safe title), `{ext}`.
 
 PDF filename parsing: first 10 chars used as date if YYYY-MM-DD; `[bracket text]` becomes tags (slugified); remainder becomes title.

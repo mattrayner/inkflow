@@ -1,5 +1,10 @@
 vault_dir = "/home/anton/Obsidian"
 
+# [webdav]
+# enable_retrieval = true  # enables GET and HEAD (default)
+# enable_mutation = false  # reserved for optional mutation methods
+# enable_locking = false   # reserved for optional LOCK/UNLOCK support
+
 # [observability]
 # metrics_enabled = true
 # metrics_addr = "127.0.0.1:9090" # dedicated listener; keep private or network-protected

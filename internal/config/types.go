@@ -30,8 +30,17 @@ type Config struct {
 	Gemini        GeminiConfig        `toml:"gemini" json:"gemini"`
 	OpenAI        OpenAIConfig        `toml:"openai" json:"openai"`
 	Ollama        OllamaConfig        `toml:"ollama" json:"ollama"`
+	WebDAV        WebDAVConfig        `toml:"webdav" json:"webdav"`
 	Observability ObservabilityConfig `toml:"observability" json:"observability"`
 	Routes        []Route             `toml:"route" json:"route"`
+}
+
+// WebDAVConfig controls optional WebDAV capability groups. Retrieval is
+// enabled by default; mutation and locking require explicit opt-in.
+type WebDAVConfig struct {
+	EnableRetrieval bool `toml:"enable_retrieval" json:"enable_retrieval"`
+	EnableMutation  bool `toml:"enable_mutation" json:"enable_mutation"`
+	EnableLocking   bool `toml:"enable_locking" json:"enable_locking"`
 }
 
 // ObservabilityConfig controls optional Prometheus metrics exposure.

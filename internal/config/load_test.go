@@ -540,6 +540,41 @@ func TestLoadAppliesServerDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadWebDAVCapabilityDefaultsAndOverrides(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	if err := os.WriteFile(path, []byte("vault_dir = \"/tmp/vault\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.WebDAV.EnableRetrieval || cfg.WebDAV.EnableMutation || cfg.WebDAV.EnableLocking {
+		t.Fatalf("unexpected WebDAV defaults: %+v", cfg.WebDAV)
+	}
+
+	if err := os.WriteFile(path, []byte("vault_dir = \"/tmp/vault\"\n[webdav]\nenable_retrieval = false\nenable_mutation = true\nenable_locking = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WebDAV.EnableRetrieval || !cfg.WebDAV.EnableMutation || !cfg.WebDAV.EnableLocking {
+		t.Fatalf("unexpected WebDAV overrides: %+v", cfg.WebDAV)
+	}
+}
+
+func TestLoadRejectsInvalidWebDAVCapabilityValue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inkflow.toml")
+	if err := os.WriteFile(path, []byte("vault_dir = \"/tmp/vault\"\n[webdav]\nenable_retrieval = \"yes\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Load(path); err == nil {
+		t.Fatal("expected invalid WebDAV capability type to be rejected")
+	}
+}
+
 func TestLoadParsesServerOverrides(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "inkflow.toml")
 	body := "vault_dir = \"/tmp/vault\"\nread_header_timeout = \"1s\"\nread_timeout = \"3s\"\nwrite_timeout = \"4s\"\nidle_timeout = \"5s\"\nmax_upload_bytes = 42\n"

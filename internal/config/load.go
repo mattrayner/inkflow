@@ -68,6 +68,9 @@ func applyDefaults(cfg *Config, md toml.MetaData) {
 	if cfg.DefaultNoteDir == "" {
 		cfg.DefaultNoteDir = "00 Inbox"
 	}
+	if !md.IsDefined("webdav", "enable_retrieval") {
+		cfg.WebDAV.EnableRetrieval = true
+	}
 	if cfg.AI.Provider == "" {
 		cfg.AI.Provider = "gemini"
 	}

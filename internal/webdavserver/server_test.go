@@ -3,6 +3,8 @@ package webdavserver
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
@@ -193,6 +195,153 @@ func TestOptionsAdvertisesMkcol(t *testing.T) {
 	}
 	if !strings.Contains(rec.Header().Get("Allow"), "MKCOL") {
 		t.Fatalf("Allow = %q, want MKCOL", rec.Header().Get("Allow"))
+	}
+}
+
+func TestOptionsCapabilitiesReflectConfig(t *testing.T) {
+	vault := t.TempDir()
+	for name, cfg := range map[string]*config.Config{
+		"retrieval enabled":  {VaultDir: vault, WebDAV: config.WebDAVConfig{EnableRetrieval: true}},
+		"retrieval disabled": {VaultDir: vault, WebDAV: config.WebDAVConfig{EnableRetrieval: false, EnableMutation: true, EnableLocking: true}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newServer(cfg, nil, nil, nil, nil)
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, httptest.NewRequest(http.MethodOptions, "/", nil))
+			if got := rec.Header().Get("DAV"); got != "1" {
+				t.Fatalf("DAV = %q, want 1", got)
+			}
+			gotRetrieval := strings.Contains(rec.Header().Get("Allow"), "GET") && strings.Contains(rec.Header().Get("Allow"), "HEAD")
+			if gotRetrieval != cfg.WebDAV.EnableRetrieval {
+				t.Fatalf("Allow = %q, retrieval enabled = %t", rec.Header().Get("Allow"), cfg.WebDAV.EnableRetrieval)
+			}
+		})
+	}
+}
+
+func TestGetAndHeadRetrieveFileMetadata(t *testing.T) {
+	vault := t.TempDir()
+	contents := []byte("pdf bytes")
+	if err := os.WriteFile(filepath.Join(vault, "note.pdf"), contents, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(vault, "note.pdf"), stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	srv := newServer(&config.Config{VaultDir: vault, WebDAV: config.WebDAVConfig{EnableRetrieval: true}}, nil, nil, nil, nil)
+
+	get := httptest.NewRecorder()
+	srv.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/note.pdf", nil))
+	if get.Code != http.StatusOK || !bytes.Equal(get.Body.Bytes(), contents) {
+		t.Fatalf("GET = %d %q", get.Code, get.Body.Bytes())
+	}
+	sum := sha256.Sum256(contents)
+	if got, want := get.Header().Get("ETag"), `"`+hex.EncodeToString(sum[:])+`"`; got != want {
+		t.Errorf("ETag = %q, want %q", got, want)
+	}
+	if got := get.Header().Get("Content-Type"); got != "application/pdf" {
+		t.Errorf("Content-Type = %q", got)
+	}
+	if got := get.Header().Get("Content-Length"); got != "9" {
+		t.Errorf("Content-Length = %q", got)
+	}
+	if got := get.Header().Get("Last-Modified"); got != stamp.Format(http.TimeFormat) {
+		t.Errorf("Last-Modified = %q", got)
+	}
+
+	head := httptest.NewRecorder()
+	srv.ServeHTTP(head, httptest.NewRequest(http.MethodHead, "/note.pdf", nil))
+	if head.Code != http.StatusOK || head.Body.Len() != 0 {
+		t.Fatalf("HEAD = %d %q", head.Code, head.Body.Bytes())
+	}
+	for _, header := range []string{"Content-Type", "Content-Length", "Last-Modified", "ETag"} {
+		if got, want := head.Header().Get(header), get.Header().Get(header); got != want {
+			t.Errorf("HEAD %s = %q, GET %s = %q", header, got, header, want)
+		}
+	}
+}
+
+func TestGetUsesImportedPDFHashForETag(t *testing.T) {
+	vault := t.TempDir()
+	if err := os.WriteFile(filepath.Join(vault, "imported.pdf"), []byte("current bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Put(&state.Record{SourcePath: "source.pdf", SHA256: "imported-hash", VaultPDFPath: "imported.pdf"}); err != nil {
+		t.Fatal(err)
+	}
+	srv := newServer(&config.Config{VaultDir: vault, WebDAV: config.WebDAVConfig{EnableRetrieval: true}}, nil, store, nil, nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/imported.pdf", nil))
+	if got := rec.Header().Get("ETag"); got != `"imported-hash"` {
+		t.Errorf("ETag = %q", got)
+	}
+}
+
+func TestGetRejectsMissingTraversalAndSymlinksAndAllowsCollections(t *testing.T) {
+	vault := t.TempDir()
+	if err := os.Mkdir(filepath.Join(vault, "collection"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("private"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(vault, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	srv := newServer(&config.Config{VaultDir: vault, WebDAV: config.WebDAVConfig{EnableRetrieval: true}}, nil, nil, nil, nil)
+	for _, target := range []string{"/missing", "/%2e%2e/secret", "/escape"} {
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		if target == "/missing" && rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", target, rec.Code)
+		} else if target != "/missing" && rec.Code != http.StatusBadRequest {
+			t.Errorf("GET %s = %d, want 400", target, rec.Code)
+		}
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/collection", nil))
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Length") != "0" {
+		t.Fatalf("collection GET = %d, length=%q", rec.Code, rec.Header().Get("Content-Length"))
+	}
+}
+
+func TestGetConditionalHeaders(t *testing.T) {
+	vault := t.TempDir()
+	file := filepath.Join(vault, "note.txt")
+	stamp := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	if err := os.WriteFile(file, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(file, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	srv := newServer(&config.Config{VaultDir: vault, WebDAV: config.WebDAVConfig{EnableRetrieval: true}}, nil, nil, nil, nil)
+	initial := httptest.NewRecorder()
+	srv.ServeHTTP(initial, httptest.NewRequest(http.MethodGet, "/note.txt", nil))
+	for name, header := range map[string]string{
+		"etag":     initial.Header().Get("ETag"),
+		"modified": stamp.Format(http.TimeFormat),
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/note.txt", nil)
+			if name == "etag" {
+				req.Header.Set("If-None-Match", header)
+			} else {
+				req.Header.Set("If-Modified-Since", header)
+			}
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotModified || rec.Body.Len() != 0 {
+				t.Fatalf("conditional GET = %d %q", rec.Code, rec.Body.Bytes())
+			}
+		})
 	}
 }
 
