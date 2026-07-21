@@ -146,10 +146,143 @@ func TestPropfindRejectsMissingAndTraversalTargets(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("PROPFIND", "/", nil)
-	req.Header.Set("Depth", "infinity")
+	req.Header.Set("Depth", "invalid")
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("infinite Depth status = %d", rec.Code)
+		t.Fatalf("invalid Depth status = %d", rec.Code)
+	}
+}
+
+func TestPropfindPropertySelectionsAndExtendedLiveProperties(t *testing.T) {
+	vault := t.TempDir()
+	file := filepath.Join(vault, "note.txt")
+	stamp := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	if err := os.WriteFile(file, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(file, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	srv := newServer(&config.Config{VaultDir: vault, WebDAV: config.WebDAVConfig{EnableRetrieval: true}}, nil, nil, nil, nil)
+
+	get := httptest.NewRecorder()
+	srv.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/note.txt", nil))
+	etag := get.Header().Get("ETag")
+	xmlETag := strings.ReplaceAll(etag, `"`, "&#34;")
+	for name, body := range map[string]string{
+		"allprop":  `<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>`,
+		"propname": `<D:propfind xmlns:D="DAV:"><D:propname/></D:propfind>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest("PROPFIND", "/note.txt", strings.NewReader(body))
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+			if rec.Code != http.StatusMultiStatus {
+				t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "<D:getetag>"+xmlETag+"</D:getetag>") && name == "allprop" {
+				t.Fatalf("allprop ETag missing: %s", rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "<D:creationdate>"+stamp.Format(time.RFC3339)+"</D:creationdate>") && name == "allprop" {
+				t.Fatalf("allprop creationdate missing: %s", rec.Body.String())
+			}
+			if name == "propname" && strings.Contains(rec.Body.String(), etag) {
+				t.Fatalf("propname included property value: %s", rec.Body.String())
+			}
+		})
+	}
+
+	req := httptest.NewRequest("PROPFIND", "/note.txt", strings.NewReader(`<D:propfind xmlns:D="DAV:"><D:prop><D:getcontentlength/><D:getetag/></D:prop></D:propfind>`))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMultiStatus || !strings.Contains(rec.Body.String(), "<D:getcontentlength>5</D:getcontentlength>") || !strings.Contains(rec.Body.String(), "<D:getetag>"+xmlETag+"</D:getetag>") || strings.Contains(rec.Body.String(), "<D:displayname>") {
+		t.Fatalf("named prop response = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest("PROPFIND", "/note.txt", strings.NewReader(`<D:propfind xmlns:D="DAV:" xmlns:X="urn:test"><D:prop><X:missing/></D:prop></D:propfind>`))
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMultiStatus || !strings.Contains(rec.Body.String(), "<D:status>HTTP/1.1 404 Not Found</D:status>") || !strings.Contains(rec.Body.String(), "<missing xmlns=\"urn:test\"></missing>") {
+		t.Fatalf("unknown property response = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPropfindDepthInfinity(t *testing.T) {
+	vault := t.TempDir()
+	for _, directory := range []string{"docs", "docs/nested"} {
+		if err := os.Mkdir(filepath.Join(vault, directory), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"docs/top.txt", "docs/nested/deep.txt"} {
+		if err := os.WriteFile(filepath.Join(vault, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := &Server{cfg: &config.Config{VaultDir: vault}}
+	req := httptest.NewRequest("PROPFIND", "/docs", nil)
+	req.Header.Set("Depth", "infinity")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMultiStatus {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	for _, href := range []string{"/docs/", "/docs/top.txt", "/docs/nested/", "/docs/nested/deep.txt"} {
+		if !strings.Contains(rec.Body.String(), "<D:href>"+href+"</D:href>") {
+			t.Errorf("missing %s: %s", href, rec.Body.String())
+		}
+	}
+}
+
+func TestProppatchSetRemoveAndAtomicProtectedProperty(t *testing.T) {
+	vault := t.TempDir()
+	if err := os.WriteFile(filepath.Join(vault, "note.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	disabled := &Server{cfg: &config.Config{VaultDir: vault}}
+	disabledRec := httptest.NewRecorder()
+	disabled.ServeHTTP(disabledRec, httptest.NewRequest("PROPPATCH", "/note.txt", strings.NewReader(`<D:propertyupdate xmlns:D="DAV:"/>`)))
+	if disabledRec.Code != http.StatusMethodNotAllowed || strings.Contains(disabledRec.Header().Get("Allow"), "PROPPATCH") {
+		t.Fatalf("disabled PROPPATCH = %d, Allow=%q", disabledRec.Code, disabledRec.Header().Get("Allow"))
+	}
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	srv := newServer(&config.Config{VaultDir: vault, WebDAV: config.WebDAVConfig{EnableMutation: true}}, nil, store, nil, nil)
+	patch := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest("PROPPATCH", "/note.txt", strings.NewReader(body)))
+		return rec
+	}
+	set := `<D:propertyupdate xmlns:D="DAV:" xmlns:X="urn:test"><D:set><D:prop><X:custom>value</X:custom></D:prop></D:set></D:propertyupdate>`
+	if rec := patch(set); rec.Code != http.StatusMultiStatus || !strings.Contains(rec.Body.String(), "HTTP/1.1 200 OK") {
+		t.Fatalf("set response = %d: %s", rec.Code, rec.Body.String())
+	}
+	propfind := func() *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest("PROPFIND", "/note.txt", strings.NewReader(`<D:propfind xmlns:D="DAV:" xmlns:X="urn:test"><D:prop><X:custom/></D:prop></D:propfind>`)))
+		return rec
+	}
+	if rec := propfind(); !strings.Contains(rec.Body.String(), `<custom xmlns="urn:test">value</custom>`) {
+		t.Fatalf("stored property missing: %s", rec.Body.String())
+	}
+	protected := `<D:propertyupdate xmlns:D="DAV:" xmlns:X="urn:test"><D:set><D:prop><X:other>not persisted</X:other><D:getcontentlength>10</D:getcontentlength></D:prop></D:set></D:propertyupdate>`
+	if rec := patch(protected); !strings.Contains(rec.Body.String(), "HTTP/1.1 403 Forbidden") || !strings.Contains(rec.Body.String(), "HTTP/1.1 424 Failed Dependency") {
+		t.Fatalf("protected response = %d: %s", rec.Code, rec.Body.String())
+	}
+	unknown := httptest.NewRecorder()
+	srv.ServeHTTP(unknown, httptest.NewRequest("PROPFIND", "/note.txt", strings.NewReader(`<D:propfind xmlns:D="DAV:" xmlns:X="urn:test"><D:prop><X:other/></D:prop></D:propfind>`)))
+	if !strings.Contains(unknown.Body.String(), "HTTP/1.1 404 Not Found") {
+		t.Fatalf("atomic failure persisted property: %s", unknown.Body.String())
+	}
+	remove := `<D:propertyupdate xmlns:D="DAV:" xmlns:X="urn:test"><D:remove><D:prop><X:custom/></D:prop></D:remove></D:propertyupdate>`
+	if rec := patch(remove); rec.Code != http.StatusMultiStatus || !strings.Contains(rec.Body.String(), "HTTP/1.1 200 OK") {
+		t.Fatalf("remove response = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := propfind(); !strings.Contains(rec.Body.String(), "HTTP/1.1 404 Not Found") {
+		t.Fatalf("removed property remains: %s", rec.Body.String())
 	}
 }
 
@@ -214,6 +347,9 @@ func TestOptionsCapabilitiesReflectConfig(t *testing.T) {
 			gotRetrieval := strings.Contains(rec.Header().Get("Allow"), "GET") && strings.Contains(rec.Header().Get("Allow"), "HEAD")
 			if gotRetrieval != cfg.WebDAV.EnableRetrieval {
 				t.Fatalf("Allow = %q, retrieval enabled = %t", rec.Header().Get("Allow"), cfg.WebDAV.EnableRetrieval)
+			}
+			if gotProppatch := strings.Contains(rec.Header().Get("Allow"), "PROPPATCH"); gotProppatch != cfg.WebDAV.EnableMutation {
+				t.Fatalf("Allow = %q, mutation enabled = %t", rec.Header().Get("Allow"), cfg.WebDAV.EnableMutation)
 			}
 		})
 	}
