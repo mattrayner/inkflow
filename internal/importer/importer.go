@@ -79,11 +79,13 @@ func (i *Importer) Import(ctx context.Context, input string, reader io.Reader, m
 
 	t, err := plan.Build(i.cfg.Routes, i.cfg, input, modTime)
 	if err != nil {
+		slog.Default().Debug("route_not_matched", "source", input, "err", err)
 		return nil, err
 	}
 	unlock := i.locks.Lock(t.NoteRel)
 	defer unlock()
 	slog.Default().Debug("route_matched", "source", input, "pdf_rel", t.PDFRel, "note_rel", t.NoteRel, "template", t.Template, "ai", t.AI)
+	slog.Default().Debug("filename_parsed", "source", input, "date", t.Date.Format("2006-01-02"), "title", t.Title, "tags", t.Tags)
 	existing, hashMatch, err := i.lookupRecord(input, sha)
 	if err != nil {
 		return nil, err
@@ -92,6 +94,8 @@ func (i *Importer) Import(ctx context.Context, input string, reader io.Reader, m
 	// useful to redo — the PDF on disk is identical, the marker blocks
 	// already hold the previous AI output, and a re-run would only burn AI
 	// tokens and produce visible flicker.
+	samePathsCheck := existing != nil && existing.VaultPDFPath == t.PDFRel && existing.VaultNotePath == t.NoteRel
+	slog.Default().Debug("dedup_check", "source", input, "sha256", sha, "record_found", existing != nil, "hash_match", hashMatch, "same_paths", samePathsCheck)
 	if existing != nil && existing.SHA256 == sha {
 		samePaths := existing.VaultPDFPath == t.PDFRel && existing.VaultNotePath == t.NoteRel
 		if samePaths && existing.SourcePath == input && existing.ContentHash != "" {
@@ -130,6 +134,15 @@ func (i *Importer) Import(ctx context.Context, input string, reader io.Reader, m
 			return i.refreshWrapper(existing, input, modTime, sha, contentHash, t, data)
 		}
 	}
+	priorAIStatus := ""
+	elapsedSinceLastSuccess := any("n/a")
+	if existing != nil {
+		priorAIStatus = existing.AIStatus
+		if !existing.AILastSuccessAt.IsZero() {
+			elapsedSinceLastSuccess = time.Since(existing.AILastSuccessAt)
+		}
+	}
+	slog.Default().Debug("debounce_check", "ai_enabled", t.AI, "min_reprocess_interval", i.minReprocessInterval, "prior_ai_status", priorAIStatus, "elapsed_since_last_success", elapsedSinceLastSuccess)
 	return i.persist(ctx, existing, input, modTime, sha, contentHash, t, data)
 }
 
@@ -311,6 +324,7 @@ func (i *Importer) persist(ctx context.Context, existing *state.Record, sourcePa
 	var summaryBody, ocrBody string
 	if t.AI {
 		// AI work is durable and intentionally deferred to retry.Scheduler.
+		slog.Default().Debug("ai_queued", "source", sourcePath, "route_ai_enabled", true)
 		summaryBody, ocrBody = "_AI processing queued._", "_AI processing queued._"
 		rec.AIStatus = state.AIStatusPending
 		rec.AIRetryCount = 0
@@ -352,6 +366,7 @@ func (i *Importer) commitImport(previousSourcePath, previousPDFPath, previousNot
 		rollback()
 		return err
 	}
+	slog.Default().Debug("pdf_written", "path", pdfAbs, "bytes", len(pdfData))
 	if err := i.writeNoteOutput(t, summaryBody, ocrBody); err != nil {
 		rollback()
 		slog.Default().Error("note_write_failed", "source", rec.SourcePath, "note", t.NoteRel, "err", err)
@@ -439,6 +454,7 @@ func (i *Importer) writeNote(t plan.Result, summaryBody, ocrBody string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	} else {
+		slog.Default().Debug("template_render_start", "template_dir", i.cfg.TemplateDir, "template", t.Template)
 		body, err := plan.RenderNoteBody(i.cfg.TemplateDir, plan.NoteData{
 			Date:       t.Date.Format("2006-01-02"),
 			Title:      t.Title,
@@ -449,6 +465,7 @@ func (i *Importer) writeNote(t plan.Result, summaryBody, ocrBody string) error {
 		if err != nil {
 			return err
 		}
+		slog.Default().Debug("template_rendered", "template", t.Template, "bytes", len(body))
 		content = body
 	}
 	preserveFailure := t.PreserveMarkerOnAIFailure && strings.HasPrefix(summaryBody, "_AI failed:")
@@ -482,10 +499,13 @@ func (i *Importer) RetryAI(ctx context.Context, rec state.Record) error {
 		return fmt.Errorf("retry AI: read vault PDF: %w", err)
 	}
 
+	slog.Default().Debug("ai_call_start", "source", rec.SourcePath)
 	res, err := i.ai.Process(ctx, bytes.NewReader(pdfData))
 	if err != nil {
+		slog.Default().Debug("ai_call_failed", "source", rec.SourcePath, "err", err)
 		return err
 	}
+	slog.Default().Debug("ai_call_success", "source", rec.SourcePath, "ocr_len", len(res.OCR), "summary_bullets", len(res.Summary))
 
 	summaryBody, ocrBody := renderBodies(res)
 
