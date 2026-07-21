@@ -329,20 +329,29 @@ func TestOptionsAdvertisesMkcol(t *testing.T) {
 	if !strings.Contains(rec.Header().Get("Allow"), "MKCOL") {
 		t.Fatalf("Allow = %q, want MKCOL", rec.Header().Get("Allow"))
 	}
+	if got := rec.Header().Get("DAV"); got != "" {
+		t.Fatalf("DAV = %q, want no compliance class without mutation", got)
+	}
 }
 
 func TestOptionsCapabilitiesReflectConfig(t *testing.T) {
 	vault := t.TempDir()
 	for name, cfg := range map[string]*config.Config{
-		"retrieval enabled":  {VaultDir: vault, WebDAV: config.WebDAVConfig{EnableRetrieval: true}},
-		"retrieval disabled": {VaultDir: vault, WebDAV: config.WebDAVConfig{EnableRetrieval: false, EnableMutation: true, EnableLocking: true}},
+		"retrieval only":            {VaultDir: vault, WebDAV: config.WebDAVConfig{EnableRetrieval: true}},
+		"locking without mutation":  {VaultDir: vault, WebDAV: config.WebDAVConfig{EnableLocking: true}},
+		"class 1 without retrieval": {VaultDir: vault, WebDAV: config.WebDAVConfig{EnableMutation: true}},
+		"class 2 without retrieval": {VaultDir: vault, WebDAV: config.WebDAVConfig{EnableMutation: true, EnableLocking: true}},
+		"class 2 with retrieval":    {VaultDir: vault, WebDAV: config.WebDAVConfig{EnableRetrieval: true, EnableMutation: true, EnableLocking: true}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := newServer(cfg, nil, nil, nil, nil)
 			rec := httptest.NewRecorder()
 			srv.ServeHTTP(rec, httptest.NewRequest(http.MethodOptions, "/", nil))
-			wantDAV := "1"
-			if cfg.WebDAV.EnableLocking {
+			wantDAV := ""
+			if cfg.WebDAV.EnableMutation {
+				wantDAV = "1"
+			}
+			if cfg.WebDAV.EnableMutation && cfg.WebDAV.EnableLocking {
 				wantDAV = "1, 2"
 			}
 			if got := rec.Header().Get("DAV"); got != wantDAV {
@@ -354,6 +363,9 @@ func TestOptionsCapabilitiesReflectConfig(t *testing.T) {
 			}
 			if gotProppatch := strings.Contains(rec.Header().Get("Allow"), "PROPPATCH"); gotProppatch != cfg.WebDAV.EnableMutation {
 				t.Fatalf("Allow = %q, mutation enabled = %t", rec.Header().Get("Allow"), cfg.WebDAV.EnableMutation)
+			}
+			if gotLocking := strings.Contains(rec.Header().Get("Allow"), "LOCK") && strings.Contains(rec.Header().Get("Allow"), "UNLOCK"); gotLocking != cfg.WebDAV.EnableLocking {
+				t.Fatalf("Allow = %q, locking enabled = %t", rec.Header().Get("Allow"), cfg.WebDAV.EnableLocking)
 			}
 		})
 	}

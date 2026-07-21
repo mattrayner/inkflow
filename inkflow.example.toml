@@ -2,8 +2,8 @@ vault_dir = "/home/anton/Obsidian"
 
 # [webdav]
 # enable_retrieval = true  # enables GET and HEAD (default)
-# enable_mutation = false  # reserved for optional mutation methods
-# enable_locking = false   # reserved for optional LOCK/UNLOCK support
+# enable_mutation = false  # enables DELETE, COPY, MOVE, and PROPPATCH; DAV: 1
+# enable_locking = false   # enables LOCK/UNLOCK and write-lock enforcement; with mutation, DAV: 1, 2
 
 # [observability]
 # metrics_enabled = true

@@ -56,7 +56,7 @@ func TestLockingConfigurationAndLifecycle(t *testing.T) {
 	disabled := &Server{cfg: &config.Config{VaultDir: vault}}
 	rec := httptest.NewRecorder()
 	disabled.ServeHTTP(rec, httptest.NewRequest("LOCK", "/note.txt", strings.NewReader(exclusiveWriteLockBody)))
-	if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("DAV") != "1" {
+	if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("DAV") != "" {
 		t.Fatalf("disabled LOCK = %d DAV=%q", rec.Code, rec.Header().Get("DAV"))
 	}
 	disabledUnlock := httptest.NewRecorder()

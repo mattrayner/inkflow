@@ -140,6 +140,14 @@ func capabilityHeaders(cfg *config.Config) (allow, dav string) {
 	}
 	if cfg != nil && cfg.WebDAV.EnableLocking {
 		methods = append(methods, "LOCK", "UNLOCK")
+	}
+	// RFC 4918 Class 1 requires DELETE, COPY, MOVE, and PROPPATCH. Do not
+	// advertise a DAV compliance class while mutation is disabled, even though
+	// the upload bridge still supports its baseline WebDAV methods.
+	if cfg == nil || !cfg.WebDAV.EnableMutation {
+		return strings.Join(methods, ", "), ""
+	}
+	if cfg.WebDAV.EnableLocking {
 		return strings.Join(methods, ", "), "1, 2"
 	}
 	return strings.Join(methods, ", "), "1"
@@ -151,6 +159,10 @@ func (s *Server) setCapabilityHeaders(w http.ResponseWriter) {
 		allow, dav = capabilityHeaders(s.cfg)
 	}
 	w.Header().Set("Allow", allow)
+	if dav == "" {
+		w.Header().Del("DAV")
+		return
+	}
 	w.Header().Set("DAV", dav)
 }
 

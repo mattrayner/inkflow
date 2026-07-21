@@ -26,10 +26,11 @@ Verbose logging: `SLOG_LEVEL=debug go run ./cmd/inkflow --config inkflow.toml se
 Required: `vault_dir`. Every route must have `from`. Missing either causes startup error.
 
 `[webdav].enable_retrieval` defaults to `true` and permits authenticated
-`GET`/`HEAD` retrieval from the vault. `enable_mutation` and `enable_locking`
-default to `false`; they are reserved capability gates until their handlers are
-implemented. The server advertises `DAV: 1` and must not advertise `DAV: 2`
-without locking support.
+`GET`/`HEAD` retrieval from the vault. `enable_mutation` enables
+`DELETE`/`COPY`/`MOVE`/`PROPPATCH`; `enable_locking` enables `LOCK`/`UNLOCK`
+and write-lock enforcement. Both default to `false`. Without mutation, no DAV
+compliance class is advertised. Mutation enables `DAV: 1`; mutation plus
+locking enables `DAV: 1, 2`.
 
 Filename pattern placeholders: `{date}` (YYYY-MM-DD), `{stem}` (basename without ext), `{slug}` (URL-safe title), `{ext}`.
 
