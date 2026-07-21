@@ -35,6 +35,17 @@ The resulting file as it appears in Obsidian.
 
 `template_dir`, if set, overrides the built-in templates in `internal/plan/templates`.
 
+### WebDAV retrieval
+
+`[webdav].enable_retrieval` defaults to `true` and enables authenticated `GET`
+and `HEAD` access to vault resources. Retrieval rejects traversal and symlinked
+paths just like WebDAV collection browsing. `enable_mutation` and
+`enable_locking` default to `false`; they are configuration gates for optional
+mutation and locking support and do not expose those methods in this release.
+
+`OPTIONS` advertises `DAV: 1`; Class 2 (`DAV: 2`) is not advertised without
+implemented locking support.
+
 ### Health and metrics
 
 `GET /healthz` is unauthenticated and returns 200 only when the state store is

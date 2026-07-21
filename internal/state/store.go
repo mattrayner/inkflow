@@ -158,6 +158,26 @@ func (s *Store) GetByHash(hash string) (*Record, error) {
 	return out, err
 }
 
+// GetByVaultPDFPath returns the import record whose PDF output is rel. This
+// permits retrieval to reuse the importer-computed SHA256 as a strong ETag.
+func (s *Store) GetByVaultPDFPath(rel string) (*Record, error) {
+	var out *Record
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(recordsBucket).ForEach(func(_, v []byte) error {
+			var r Record
+			if err := json.Unmarshal(v, &r); err != nil {
+				return err
+			}
+			if r.VaultPDFPath == rel {
+				copy := r
+				out = &copy
+			}
+			return nil
+		})
+	})
+	return out, err
+}
+
 func (s *Store) Put(r *Record) error {
 	return s.Save("", r)
 }
