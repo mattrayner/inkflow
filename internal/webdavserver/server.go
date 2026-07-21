@@ -115,6 +115,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleGetOrHead(w, r)
+	case http.MethodDelete, "COPY", "MOVE":
+		if !s.cfg.WebDAV.EnableMutation {
+			s.methodNotAllowed(w)
+			return
+		}
+		s.handleMutation(w, r)
 	default:
 		s.methodNotAllowed(w)
 	}
@@ -126,7 +132,7 @@ func capabilityHeaders(cfg *config.Config) (allow, dav string) {
 		methods = append(methods, "GET", "HEAD")
 	}
 	if cfg != nil && cfg.WebDAV.EnableMutation {
-		methods = append(methods, "PROPPATCH")
+		methods = append(methods, "DELETE", "COPY", "MOVE", "PROPPATCH")
 	}
 	// This increment implements no locking methods, so it must never advertise
 	// DAV Class 2 even if its future-facing configuration flag is set.
